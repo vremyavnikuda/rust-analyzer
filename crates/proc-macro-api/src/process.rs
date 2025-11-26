@@ -28,9 +28,15 @@ pub(crate) struct ProcMacroServerProcess {
     exited: OnceLock<AssertUnwindSafe<ServerError>>,
 }
 
-#[derive(Debug)]
-enum Protocol {
-    LegacyJson { mode: SpanMode },
+#[derive(Debug, Clone)]
+pub(crate) enum Protocol {
+    LegacyJson {
+        mode: SpanMode,
+    },
+    #[expect(dead_code)]
+    Postcard {
+        mode: SpanMode,
+    },
 }
 
 /// Maintains the state of the proc-macro server process.
@@ -99,6 +105,10 @@ impl ProcMacroServerProcess {
         self.exited.get().map(|it| &it.0)
     }
 
+    pub(crate) fn use_postcard(&self) -> bool {
+        matches!(self.protocol, Protocol::Postcard { .. })
+    }
+
     /// Retrieves the API version of the proc-macro server.
     pub(crate) fn version(&self) -> u32 {
         self.version
@@ -108,6 +118,7 @@ impl ProcMacroServerProcess {
     pub(crate) fn rust_analyzer_spans(&self) -> bool {
         match self.protocol {
             Protocol::LegacyJson { mode } => mode == SpanMode::RustAnalyzer,
+            Protocol::Postcard { mode } => mode == SpanMode::RustAnalyzer,
         }
     }
 
@@ -115,6 +126,7 @@ impl ProcMacroServerProcess {
     fn version_check(&self) -> Result<u32, ServerError> {
         match self.protocol {
             Protocol::LegacyJson { .. } => legacy_protocol::version_check(self),
+            Protocol::Postcard { .. } => legacy_protocol::version_check(self),
         }
     }
 
@@ -122,6 +134,7 @@ impl ProcMacroServerProcess {
     fn enable_rust_analyzer_spans(&self) -> Result<SpanMode, ServerError> {
         match self.protocol {
             Protocol::LegacyJson { .. } => legacy_protocol::enable_rust_analyzer_spans(self),
+            Protocol::Postcard { .. } => legacy_protocol::enable_rust_analyzer_spans(self),
         }
     }
 
@@ -132,21 +145,25 @@ impl ProcMacroServerProcess {
     ) -> Result<Result<Vec<(String, ProcMacroKind)>, String>, ServerError> {
         match self.protocol {
             Protocol::LegacyJson { .. } => legacy_protocol::find_proc_macros(self, dylib_path),
+            Protocol::Postcard { .. } => legacy_protocol::find_proc_macros(self, dylib_path),
         }
     }
 
-    pub(crate) fn send_task<Request, Response>(
+    pub(crate) fn send_task<Request, Response, Buf>(
         &self,
         serialize_req: impl FnOnce(
             &mut dyn Write,
             &mut dyn BufRead,
             Request,
-            &mut String,
+            &mut Buf,
         ) -> Result<Option<Response>, ServerError>,
         req: Request,
-    ) -> Result<Response, ServerError> {
+    ) -> Result<Response, ServerError>
+    where
+        Buf: Default,
+    {
         let state = &mut *self.state.lock().unwrap();
-        let mut buf = String::new();
+        let mut buf = Buf::default();
         serialize_req(&mut state.stdin, &mut state.stdout, req, &mut buf)
             .and_then(|res| {
                 res.ok_or_else(|| {

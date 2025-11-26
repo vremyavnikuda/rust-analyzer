@@ -233,14 +233,17 @@ impl<'db> SolverDelegate for SolverContext<'db> {
         _param_env: ParamEnv<'db>,
         uv: rustc_type_ir::UnevaluatedConst<Self::Interner>,
     ) -> Option<<Self::Interner as rustc_type_ir::Interner>::Const> {
-        let c = match uv.def {
-            SolverDefId::ConstId(c) => GeneralConstId::ConstId(c),
-            SolverDefId::StaticId(c) => GeneralConstId::StaticId(c),
-            _ => unreachable!(),
-        };
-        let subst = uv.args;
-        let ec = self.cx().db.const_eval(c, subst, None).ok()?;
-        Some(ec)
+        match uv.def.0 {
+            GeneralConstId::ConstId(c) => {
+                let subst = uv.args;
+                let ec = self.cx().db.const_eval(c, subst, None).ok()?;
+                Some(ec)
+            }
+            GeneralConstId::StaticId(c) => {
+                let ec = self.cx().db.const_eval_static(c).ok()?;
+                Some(ec)
+            }
+        }
     }
 
     fn compute_goal_fast_path(

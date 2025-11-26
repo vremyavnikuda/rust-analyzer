@@ -273,10 +273,9 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + SourceDatabase {
 
     // endregion:visibilities
 
-    #[salsa::invoke(crate::lang_item::notable_traits_in_deps)]
-    fn notable_traits_in_deps(&self, krate: Crate) -> Arc<[Arc<[TraitId]>]>;
     #[salsa::invoke(crate::lang_item::crate_notable_traits)]
-    fn crate_notable_traits(&self, krate: Crate) -> Option<Arc<[TraitId]>>;
+    #[salsa::transparent]
+    fn crate_notable_traits(&self, krate: Crate) -> Option<&[TraitId]>;
 
     #[salsa::invoke(crate_supports_no_std)]
     fn crate_supports_no_std(&self, crate_id: Crate) -> bool;
@@ -339,7 +338,7 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
     let kind = |expander, file_id, m| {
         let in_file = InFile::new(file_id, m);
         match expander {
-            MacroExpander::Declarative => MacroDefKind::Declarative(in_file),
+            MacroExpander::Declarative { styles } => MacroDefKind::Declarative(in_file, styles),
             MacroExpander::BuiltIn(it) => MacroDefKind::BuiltIn(in_file, it),
             MacroExpander::BuiltInAttr(it) => MacroDefKind::BuiltInAttr(in_file, it),
             MacroExpander::BuiltInDerive(it) => MacroDefKind::BuiltInDerive(in_file, it),

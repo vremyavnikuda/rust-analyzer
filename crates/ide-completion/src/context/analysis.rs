@@ -657,7 +657,7 @@ fn expected_type_and_name<'db>(
                     cov_mark::hit!(expected_type_fn_param);
                     ActiveParameter::at_token(
                         sema,
-                       token.clone(),
+                        token.clone(),
                     ).map(|ap| {
                         let name = ap.ident().map(NameOrNameRef::Name);
                         (Some(ap.ty), name)
@@ -1679,12 +1679,16 @@ fn pattern_context_for(
     let mut param_ctx = None;
 
     let mut missing_variants = vec![];
+    let is_pat_like = |kind| {
+        ast::Pat::can_cast(kind)
+            || ast::RecordPatField::can_cast(kind)
+            || ast::RecordPatFieldList::can_cast(kind)
+    };
 
-    let (refutability, has_type_ascription) =
-    pat
+    let (refutability, has_type_ascription) = pat
         .syntax()
         .ancestors()
-        .find(|it| !ast::Pat::can_cast(it.kind()))
+        .find(|it| !is_pat_like(it.kind()))
         .map_or((PatternRefutability::Irrefutable, false), |node| {
             let refutability = match_ast! {
                 match node {
