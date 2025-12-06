@@ -25,21 +25,24 @@ import re
 
 SMOL_INLINE_SIZE_RE = re.compile(r".*::_V(\d+)$")
 
+
 def _read_utf8(mem):
     try:
         return mem.tobytes().decode("utf-8", errors="replace")
     except Exception:
         return repr(mem.tobytes())
 
+
 def _active_variant(enum_val):
     """Return (variant_name, variant_value) for a Rust enum value using discriminant logic.
-       Assume layout: fields[0] is unnamed u8 discriminant; fields[1] is the active variant.
+    Assume layout: fields[0] is unnamed u8 discriminant; fields[1] is the active variant.
     """
     fields = enum_val.type.fields()
     if len(fields) < 2:
         return None, None
     variant_field = fields[1]
     return variant_field.name, enum_val[variant_field]
+
 
 class SmolStrProvider:
     def __init__(self, val):
@@ -70,24 +73,24 @@ class SmolStrProvider:
 
         if variant_name == "Static":
             try:
-                data_ptr = variant_val["data_ptr"]
-                length = int(variant_val["length"])
-                mem = gdb.selected_inferior().read_memory(int(data_ptr), length)
-                return _read_utf8(mem)
+                # variant_val["__0"] is &'static str
+                return variant_val["__0"]
             except Exception as e:
                 return f"<SmolStr Static error: {e}>"
 
         if variant_name == "Heap":
             try:
-                # variant_val is an Arc<str>
+                # variant_val["__0"] is an Arc<str>
                 inner = variant_val["__0"]["ptr"]["pointer"]
                 # inner is a fat pointer to ArcInner<str>
                 data_ptr = inner["data_ptr"]
                 length = int(inner["length"])
                 # ArcInner layout:
                 # strong: Atomic<usize>, weak: Atomic<usize> | unsized tail 'data' bytes.
-                sizeof_AtomicUsize = gdb.lookup_type("core::sync::atomic::AtomicUsize").sizeof
-                header_size = sizeof_AtomicUsize * 2       # strong + weak counters
+                sizeof_AtomicUsize = gdb.lookup_type(
+                    "core::sync::atomic::AtomicUsize"
+                ).sizeof
+                header_size = sizeof_AtomicUsize * 2  # strong + weak counters
                 data_arr = int(data_ptr) + header_size
                 mem = gdb.selected_inferior().read_memory(data_arr, length)
                 return _read_utf8(mem)
@@ -98,6 +101,7 @@ class SmolStrProvider:
 
     def display_hint(self):
         return "string"
+
 
 class SmolStrSubPrinter(gdb.printing.SubPrettyPrinter):
     def __init__(self):
@@ -114,6 +118,7 @@ class SmolStrSubPrinter(gdb.printing.SubPrettyPrinter):
             pass
         return None
 
+
 class SmolStrPrettyPrinter(gdb.printing.PrettyPrinter):
     def __init__(self):
         super(SmolStrPrettyPrinter, self).__init__("smol_str", [])
@@ -129,9 +134,12 @@ class SmolStrPrettyPrinter(gdb.printing.PrettyPrinter):
                 return pp
         return None
 
+
 printer = SmolStrPrettyPrinter()
+
 
 def register_printers(objfile=None):
     gdb.printing.register_pretty_printer(objfile, printer, replace=True)
+
 
 register_printers()
