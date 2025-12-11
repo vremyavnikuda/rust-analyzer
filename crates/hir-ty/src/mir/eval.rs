@@ -635,7 +635,7 @@ impl<'db> Evaluator<'db> {
         trait_env: Option<ParamEnvAndCrate<'db>>,
     ) -> Result<'db, Evaluator<'db>> {
         let module = owner.module(db);
-        let crate_id = module.krate();
+        let crate_id = module.krate(db);
         let target_data_layout = match db.target_data_layout(crate_id) {
             Ok(target_data_layout) => target_data_layout,
             Err(e) => return Err(MirEvalError::TargetDataLayoutNotAvailable(e)),
@@ -722,6 +722,7 @@ impl<'db> Evaluator<'db> {
         let (ty, proj) = pair;
         let r = proj.projected_ty(
             &self.infcx,
+            self.param_env.param_env,
             ty,
             |c, subst, f| {
                 let InternedClosure(def, _) = self.db.lookup_intern_closure(c);
