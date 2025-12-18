@@ -162,7 +162,7 @@ fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> InferenceResult<'_> 
     ctx.resolve_all()
 }
 
-fn infer_cycle_result(db: &dyn HirDatabase, _: DefWithBodyId) -> InferenceResult<'_> {
+fn infer_cycle_result(db: &dyn HirDatabase, _: salsa::Id, _: DefWithBodyId) -> InferenceResult<'_> {
     InferenceResult {
         has_errors: true,
         ..InferenceResult::new(Ty::new_error(DbInterner::new_no_crate(db), ErrorGuaranteed))
@@ -547,7 +547,7 @@ pub struct InferenceResult<'db> {
 
 #[salsa::tracked]
 impl<'db> InferenceResult<'db> {
-    #[salsa::tracked(returns(ref), cycle_result = infer_cycle_result)]
+    #[salsa::tracked(returns(ref), cycle_result = infer_cycle_result, unsafe(non_update_types))]
     pub fn for_body(db: &'db dyn HirDatabase, def: DefWithBodyId) -> InferenceResult<'db> {
         infer_query(db, def)
     }
@@ -653,19 +653,16 @@ impl<'db> InferenceResult<'db> {
     }
     pub fn type_of_expr_with_adjust(&self, id: ExprId) -> Option<Ty<'db>> {
         match self.expr_adjustments.get(&id).and_then(|adjustments| {
-            adjustments
-                .iter()
-                .filter(|adj| {
-                    // https://github.com/rust-lang/rust/blob/67819923ac8ea353aaa775303f4c3aacbf41d010/compiler/rustc_mir_build/src/thir/cx/expr.rs#L140
-                    !matches!(
-                        adj,
-                        Adjustment {
-                            kind: Adjust::NeverToAny,
-                            target,
-                        } if target.is_never()
-                    )
-                })
-                .next_back()
+            adjustments.iter().rfind(|adj| {
+                // https://github.com/rust-lang/rust/blob/67819923ac8ea353aaa775303f4c3aacbf41d010/compiler/rustc_mir_build/src/thir/cx/expr.rs#L140
+                !matches!(
+                    adj,
+                    Adjustment {
+                        kind: Adjust::NeverToAny,
+                        target,
+                    } if target.is_never()
+                )
+            })
         }) {
             Some(adjustment) => Some(adjustment.target),
             None => self.type_of_expr.get(id).copied(),

@@ -1,4 +1,10 @@
 //! A set of high-level utility fixture methods to use in tests.
+
+#![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
+
+#[cfg(feature = "in-rust-tree")]
+extern crate rustc_driver as _;
+
 use std::{any::TypeId, mem, str::FromStr, sync};
 
 use base_db::target::TargetData;
@@ -233,6 +239,7 @@ impl ChangeFixture {
                     Some(meta.cfg),
                     meta.env,
                     origin,
+                    meta.crate_attrs,
                     false,
                     proc_macro_cwd.clone(),
                     crate_ws_data.clone(),
@@ -286,6 +293,7 @@ impl ChangeFixture {
                     String::from("__ra_is_test_fixture"),
                 )]),
                 CrateOrigin::Lang(LangCrateOrigin::Core),
+                Vec::new(),
                 false,
                 proc_macro_cwd.clone(),
                 crate_ws_data.clone(),
@@ -316,6 +324,7 @@ impl ChangeFixture {
                 Some(default_cfg),
                 default_env,
                 CrateOrigin::Local { repo: None, name: None },
+                Vec::new(),
                 false,
                 proc_macro_cwd.clone(),
                 crate_ws_data.clone(),
@@ -379,6 +388,7 @@ impl ChangeFixture {
                     String::from("__ra_is_test_fixture"),
                 )]),
                 CrateOrigin::Local { repo: None, name: None },
+                Vec::new(),
                 true,
                 proc_macro_cwd,
                 crate_ws_data,
@@ -629,6 +639,7 @@ struct FileMeta {
     cfg: CfgOptions,
     edition: Edition,
     env: Env,
+    crate_attrs: Vec<String>,
     introduce_new_source_root: Option<SourceRootKind>,
 }
 
@@ -660,6 +671,7 @@ impl FileMeta {
             cfg,
             edition: f.edition.map_or(Edition::CURRENT, |v| Edition::from_str(&v).unwrap()),
             env: f.env.into_iter().collect(),
+            crate_attrs: f.crate_attrs,
             introduce_new_source_root,
         }
     }

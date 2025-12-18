@@ -10,13 +10,15 @@ use std::{
     ops::{self, ControlFlow, Not},
 };
 
+use base_db::FxIndexSet;
 use either::Either;
 use hir_def::{
     DefWithBodyId, FunctionId, MacroId, StructId, TraitId, VariantId,
+    attrs::parse_extra_crate_attrs,
     expr_store::{Body, ExprOrPatSource, HygieneId, path::Path},
     hir::{BindingId, Expr, ExprId, ExprOrPatId, Pat},
     nameres::{ModuleOrigin, crate_def_map},
-    resolver::{self, HasResolver, Resolver, TypeNs},
+    resolver::{self, HasResolver, Resolver, TypeNs, ValueNs},
     type_ref::Mutability,
 };
 use hir_expand::{
@@ -265,14 +267,27 @@ impl<DB: HirDatabase + ?Sized> Semantics<'_, DB> {
 
     pub fn lint_attrs(
         &self,
+        file_id: FileId,
         krate: Crate,
         item: ast::AnyHasAttrs,
-    ) -> impl Iterator<Item = (LintAttr, SmolStr)> {
+    ) -> impl DoubleEndedIterator<Item = (LintAttr, SmolStr)> {
         let mut cfg_options = None;
         let cfg_options = || *cfg_options.get_or_insert_with(|| krate.id.cfg_options(self.db));
+
+        let is_crate_root = file_id == krate.root_file(self.imp.db);
+        let is_source_file = ast::SourceFile::can_cast(item.syntax().kind());
+        let extra_crate_attrs = (is_crate_root && is_source_file)
+            .then(|| {
+                parse_extra_crate_attrs(self.imp.db, krate.id)
+                    .into_iter()
+                    .flat_map(|src| src.attrs())
+            })
+            .into_iter()
+            .flatten();
+
         let mut result = Vec::new();
         hir_expand::attrs::expand_cfg_attr::<Infallible>(
-            ast::attrs_including_inner(&item),
+            extra_crate_attrs.chain(ast::attrs_including_inner(&item)),
             cfg_options,
             |attr, _, _, _| {
                 let hir_expand::attrs::Meta::TokenTree { path, tt } = attr else {
@@ -2191,6 +2206,106 @@ impl<'db> SemanticsImpl<'db> {
         let adt_source = adt_ast_id.to_in_file_node(self.db);
         self.cache(adt_source.value.syntax().ancestors().last().unwrap(), adt_source.file_id);
         ToDef::to_def(self, adt_source.as_ref())
+    }
+
+    pub fn locals_used(
+        &self,
+        element: Either<&ast::Expr, &ast::StmtList>,
+        text_range: TextRange,
+    ) -> Option<FxIndexSet<Local>> {
+        let sa = self.analyze(element.either(|e| e.syntax(), |s| s.syntax()))?;
+        let store = sa.store()?;
+        let mut resolver = sa.resolver.clone();
+        let def = resolver.body_owner()?;
+
+        let is_not_generated = |path: &Path| {
+            !path.mod_path().and_then(|path| path.as_ident()).is_some_and(Name::is_generated)
+        };
+
+        let exprs = element.either(
+            |e| vec![e.clone()],
+            |stmts| {
+                let mut exprs: Vec<_> = stmts
+                    .statements()
+                    .filter(|stmt| text_range.contains_range(stmt.syntax().text_range()))
+                    .filter_map(|stmt| match stmt {
+                        ast::Stmt::ExprStmt(expr_stmt) => expr_stmt.expr().map(|e| vec![e]),
+                        ast::Stmt::Item(_) => None,
+                        ast::Stmt::LetStmt(let_stmt) => {
+                            let init = let_stmt.initializer();
+                            let let_else = let_stmt
+                                .let_else()
+                                .and_then(|le| le.block_expr())
+                                .map(ast::Expr::BlockExpr);
+
+                            match (init, let_else) {
+                                (Some(i), Some(le)) => Some(vec![i, le]),
+                                (Some(i), _) => Some(vec![i]),
+                                (_, Some(le)) => Some(vec![le]),
+                                _ => None,
+                            }
+                        }
+                    })
+                    .flatten()
+                    .collect();
+
+                if let Some(tail_expr) = stmts.tail_expr()
+                    && text_range.contains_range(tail_expr.syntax().text_range())
+                {
+                    exprs.push(tail_expr);
+                }
+                exprs
+            },
+        );
+        let mut exprs: Vec<_> =
+            exprs.into_iter().filter_map(|e| sa.expr_id(e).and_then(|e| e.as_expr())).collect();
+
+        let mut locals: FxIndexSet<Local> = FxIndexSet::default();
+        let mut add_to_locals_used = |id, parent_expr| {
+            let path = match id {
+                ExprOrPatId::ExprId(expr_id) => {
+                    if let Expr::Path(path) = &store[expr_id] {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                }
+                ExprOrPatId::PatId(pat_id) => {
+                    if let Pat::Path(path) = &store[pat_id] {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(path) = path
+                && is_not_generated(path)
+            {
+                let _ = resolver.update_to_inner_scope(self.db, def, parent_expr);
+                let hygiene = store.expr_or_pat_path_hygiene(id);
+                resolver.resolve_path_in_value_ns_fully(self.db, path, hygiene).inspect(|value| {
+                    if let ValueNs::LocalBinding(id) = value {
+                        locals.insert((def, *id).into());
+                    }
+                });
+            }
+        };
+
+        while let Some(expr_id) = exprs.pop() {
+            if let Expr::Assignment { target, .. } = store[expr_id] {
+                store.walk_pats(target, &mut |id| {
+                    add_to_locals_used(ExprOrPatId::PatId(id), expr_id)
+                });
+            };
+            store.walk_child_exprs(expr_id, |id| {
+                exprs.push(id);
+            });
+
+            add_to_locals_used(ExprOrPatId::ExprId(expr_id), expr_id)
+        }
+
+        Some(locals)
     }
 }
 
