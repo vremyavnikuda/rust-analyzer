@@ -14,7 +14,7 @@ use rustc_type_ir::{
     InferTy, TypeVisitableExt, Upcast, Variance,
     elaborate::{self, supertrait_def_ids},
     fast_reject::{DeepRejectCtxt, TreatParams, simplify_type},
-    inherent::{AdtDef as _, BoundExistentialPredicates as _, IntoKind, SliceLike, Ty as _},
+    inherent::{AdtDef as _, BoundExistentialPredicates as _, IntoKind, Ty as _},
 };
 use smallvec::{SmallVec, smallvec};
 use tracing::{debug, instrument};
@@ -1977,7 +1977,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
             && self.mode == Mode::MethodCall
         {
             let sig = self.xform_method_sig(item, args);
-            (sig.inputs().as_slice()[0], Some(sig.output()))
+            (sig.inputs()[0], Some(sig.output()))
         } else {
             (impl_ty, None)
         }

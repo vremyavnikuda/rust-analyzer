@@ -630,7 +630,8 @@ fn compute_ref_match(
         return None;
     }
     if let Some(expected_without_ref) = &expected_without_ref
-        && completion_without_ref.is_none()
+        && (completion_without_ref.is_none()
+            || completion_ty.could_unify_with(ctx.db, expected_without_ref))
         && completion_ty.autoderef(ctx.db).any(|ty| ty == *expected_without_ref)
     {
         cov_mark::hit!(suggest_ref);
@@ -2232,6 +2233,24 @@ fn main() {
                 fn main() fn() []
             "#]],
         );
+        check_relevance(
+            r#"
+struct S;
+fn foo(s: &&S) {}
+fn main() {
+    let mut ssss = &S;
+    foo($0);
+}
+            "#,
+            expect![[r#"
+                st S S []
+                lc ssss &S [local]
+                lc &ssss [type+local]
+                st S S []
+                fn foo(…) fn(&&S) []
+                fn main() fn() []
+            "#]],
+        );
     }
 
     #[test]
@@ -3254,6 +3273,48 @@ struct S {
 impl S {
     fn some_fn(&self) {
         let l = self.length
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn field_access_includes_closure_this_param() {
+        check_edit(
+            "length",
+            r#"
+//- minicore: fn
+struct S {
+    length: i32
+}
+
+impl S {
+    fn pack(&mut self, f: impl FnOnce(&mut Self, i32)) {
+        self.length += 1;
+        f(self, 3);
+        self.length -= 1;
+    }
+
+    fn some_fn(&mut self) {
+        self.pack(|this, n| len$0);
+    }
+}
+"#,
+            r#"
+struct S {
+    length: i32
+}
+
+impl S {
+    fn pack(&mut self, f: impl FnOnce(&mut Self, i32)) {
+        self.length += 1;
+        f(self, 3);
+        self.length -= 1;
+    }
+
+    fn some_fn(&mut self) {
+        self.pack(|this, n| this.length);
     }
 }
 "#,

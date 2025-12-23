@@ -788,6 +788,7 @@ dependencies = [
  "itertools 0.14.0",
  "ra-ap-rustc_type_ir",
  "rustc-hash 2.1.1",
+ "serde_json",
  "smallvec",
  "span",
  "stdx",
@@ -901,6 +902,8 @@ dependencies = [
  "rustc_apfloat",
  "salsa",
  "salsa-macros",
+ "serde",
+ "serde_derive",
  "smallvec",
  "span",
  "stdx",
@@ -1214,7 +1217,9 @@ version = "0.0.0"
 dependencies = [
  "dashmap",
  "hashbrown 0.14.5",
+ "rayon",
  "rustc-hash 2.1.1",
+ "smallvec",
  "triomphe",
 ]
 
