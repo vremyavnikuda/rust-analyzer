@@ -192,45 +192,31 @@ impl ProcMacro {
     }
 
     /// On some server versions, the fixup ast id is different than ours. So change it to match.
-    fn change_fixup_to_match_old_server(&self, tt: &mut tt::TopSubtree<Span>) {
+    fn change_fixup_to_match_old_server(&self, tt: &mut tt::TopSubtree) {
         const OLD_FIXUP_AST_ID: ErasedFileAstId = ErasedFileAstId::from_raw(!0 - 1);
-        let change_ast_id = |ast_id: &mut ErasedFileAstId| {
+        tt.change_every_ast_id(|ast_id| {
             if *ast_id == FIXUP_ERASED_FILE_AST_ID_MARKER {
                 *ast_id = OLD_FIXUP_AST_ID;
             } else if *ast_id == OLD_FIXUP_AST_ID {
                 // Swap between them, that means no collision plus the change can be reversed by doing itself.
                 *ast_id = FIXUP_ERASED_FILE_AST_ID_MARKER;
             }
-        };
-
-        for tt in &mut tt.0 {
-            match tt {
-                tt::TokenTree::Leaf(tt::Leaf::Ident(tt::Ident { span, .. }))
-                | tt::TokenTree::Leaf(tt::Leaf::Literal(tt::Literal { span, .. }))
-                | tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct { span, .. })) => {
-                    change_ast_id(&mut span.anchor.ast_id);
-                }
-                tt::TokenTree::Subtree(subtree) => {
-                    change_ast_id(&mut subtree.delimiter.open.anchor.ast_id);
-                    change_ast_id(&mut subtree.delimiter.close.anchor.ast_id);
-                }
-            }
-        }
+        });
     }
 
     /// Expands the procedural macro by sending an expansion request to the server.
     /// This includes span information and environmental context.
     pub fn expand(
         &self,
-        subtree: tt::SubtreeView<'_, Span>,
-        attr: Option<tt::SubtreeView<'_, Span>>,
+        subtree: tt::SubtreeView<'_>,
+        attr: Option<tt::SubtreeView<'_>>,
         env: Vec<(String, String)>,
         def_site: Span,
         call_site: Span,
         mixed_site: Span,
         current_dir: String,
         callback: Option<SubCallback<'_>>,
-    ) -> Result<Result<tt::TopSubtree<Span>, String>, ServerError> {
+    ) -> Result<Result<tt::TopSubtree, String>, ServerError> {
         let (mut subtree, mut attr) = (subtree, attr);
         let (mut subtree_changed, mut attr_changed);
         if self.needs_fixup_change() {

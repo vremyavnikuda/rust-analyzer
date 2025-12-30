@@ -1,6 +1,4 @@
 //! The main loop of the proc-macro server.
-use std::io;
-
 use proc_macro_api::{
     Codec,
     bidirectional_protocol::msg as bidirectional,
@@ -8,6 +6,7 @@ use proc_macro_api::{
     transport::codec::{json::JsonProtocol, postcard::PostcardProtocol},
     version::CURRENT_API_VERSION,
 };
+use std::io;
 
 use legacy::Message;
 
@@ -53,8 +52,8 @@ fn run_new<C: Codec>() -> io::Result<()> {
     }
 
     let mut buf = C::Buf::default();
-    let mut stdin = io::stdin().lock();
-    let mut stdout = io::stdout().lock();
+    let mut stdin = io::stdin();
+    let mut stdout = io::stdout();
 
     let env_snapshot = EnvSnapshot::default();
     let srv = proc_macro_srv::ProcMacroSrv::new(&env_snapshot);
@@ -62,7 +61,8 @@ fn run_new<C: Codec>() -> io::Result<()> {
     let mut span_mode = legacy::SpanMode::Id;
 
     'outer: loop {
-        let req_opt = bidirectional::BidirectionalMessage::read::<_, C>(&mut stdin, &mut buf)?;
+        let req_opt =
+            bidirectional::BidirectionalMessage::read::<_, C>(&mut stdin.lock(), &mut buf)?;
         let Some(req) = req_opt else {
             break 'outer;
         };
@@ -77,30 +77,23 @@ fn run_new<C: Codec>() -> io::Result<()> {
                             .collect()
                     });
 
-                    send_response::<_, C>(&mut stdout, bidirectional::Response::ListMacros(res))?;
+                    send_response::<C>(&stdout, bidirectional::Response::ListMacros(res))?;
                 }
 
                 bidirectional::Request::ApiVersionCheck {} => {
                     // bidirectional::Response::ApiVersionCheck(CURRENT_API_VERSION).write::<_, C>(stdout)
-                    send_response::<_, C>(
-                        &mut stdout,
+                    send_response::<C>(
+                        &stdout,
                         bidirectional::Response::ApiVersionCheck(CURRENT_API_VERSION),
                     )?;
                 }
 
                 bidirectional::Request::SetConfig(config) => {
                     span_mode = config.span_mode;
-                    send_response::<_, C>(&mut stdout, bidirectional::Response::SetConfig(config))?;
+                    send_response::<C>(&stdout, bidirectional::Response::SetConfig(config))?;
                 }
                 bidirectional::Request::ExpandMacro(task) => {
-                    handle_expand::<_, _, C>(
-                        &srv,
-                        &mut stdin,
-                        &mut stdout,
-                        &mut buf,
-                        span_mode,
-                        *task,
-                    )?;
+                    handle_expand::<C>(&srv, &mut stdin, &mut stdout, &mut buf, span_mode, *task)?;
                 }
             },
             _ => continue,
@@ -110,25 +103,23 @@ fn run_new<C: Codec>() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_expand<W: std::io::Write, R: std::io::BufRead, C: Codec>(
+fn handle_expand<C: Codec>(
     srv: &proc_macro_srv::ProcMacroSrv<'_>,
-    stdin: &mut R,
-    stdout: &mut W,
+    stdin: &io::Stdin,
+    stdout: &io::Stdout,
     buf: &mut C::Buf,
     span_mode: legacy::SpanMode,
     task: bidirectional::ExpandMacro,
 ) -> io::Result<()> {
     match span_mode {
-        legacy::SpanMode::Id => handle_expand_id::<_, C>(srv, stdout, task),
-        legacy::SpanMode::RustAnalyzer => {
-            handle_expand_ra::<_, _, C>(srv, stdin, stdout, buf, task)
-        }
+        legacy::SpanMode::Id => handle_expand_id::<C>(srv, stdout, task),
+        legacy::SpanMode::RustAnalyzer => handle_expand_ra::<C>(srv, stdin, stdout, buf, task),
     }
 }
 
-fn handle_expand_id<W: std::io::Write, C: Codec>(
+fn handle_expand_id<C: Codec>(
     srv: &proc_macro_srv::ProcMacroSrv<'_>,
-    stdout: &mut W,
+    stdout: &io::Stdout,
     task: bidirectional::ExpandMacro,
 ) -> io::Result<()> {
     let bidirectional::ExpandMacro { lib, env, current_dir, data } = task;
@@ -167,13 +158,46 @@ fn handle_expand_id<W: std::io::Write, C: Codec>(
         })
         .map_err(|e| legacy::PanicMessage(e.into_string().unwrap_or_default()));
 
-    send_response::<_, C>(stdout, bidirectional::Response::ExpandMacro(res))
+    send_response::<C>(&stdout, bidirectional::Response::ExpandMacro(res))
 }
 
-fn handle_expand_ra<W: io::Write, R: io::BufRead, C: Codec>(
+struct ProcMacroClientHandle<'a, C: Codec> {
+    stdin: &'a io::Stdin,
+    stdout: &'a io::Stdout,
+    buf: &'a mut C::Buf,
+}
+
+impl<C: Codec> proc_macro_srv::ProcMacroClientInterface for ProcMacroClientHandle<'_, C> {
+    fn source_text(&mut self, file_id: u32, start: u32, end: u32) -> Option<String> {
+        let req = bidirectional::BidirectionalMessage::SubRequest(
+            bidirectional::SubRequest::SourceText { file_id, start, end },
+        );
+
+        if req.write::<_, C>(&mut self.stdout.lock()).is_err() {
+            return None;
+        }
+
+        let msg = match bidirectional::BidirectionalMessage::read::<_, C>(
+            &mut self.stdin.lock(),
+            self.buf,
+        ) {
+            Ok(Some(msg)) => msg,
+            _ => return None,
+        };
+
+        match msg {
+            bidirectional::BidirectionalMessage::SubResponse(
+                bidirectional::SubResponse::SourceTextResult { text },
+            ) => text,
+            _ => None,
+        }
+    }
+}
+
+fn handle_expand_ra<C: Codec>(
     srv: &proc_macro_srv::ProcMacroSrv<'_>,
-    stdin: &mut R,
-    stdout: &mut W,
+    stdin: &io::Stdin,
+    stdout: &io::Stdout,
     buf: &mut C::Buf,
     task: bidirectional::ExpandMacro,
 ) -> io::Result<()> {
@@ -201,86 +225,41 @@ fn handle_expand_ra<W: io::Write, R: io::BufRead, C: Codec>(
         macro_body.to_tokenstream_resolved(CURRENT_API_VERSION, &span_data_table, |a, b| {
             srv.join_spans(a, b).unwrap_or(b)
         });
+
     let attributes = attributes.map(|it| {
         it.to_tokenstream_resolved(CURRENT_API_VERSION, &span_data_table, |a, b| {
             srv.join_spans(a, b).unwrap_or(b)
         })
     });
 
-    let (subreq_tx, subreq_rx) = crossbeam_channel::unbounded();
-    let (subresp_tx, subresp_rx) = crossbeam_channel::unbounded();
-    let (result_tx, result_rx) = crossbeam_channel::bounded(1);
-
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let callback = Box::new(move |req: proc_macro_srv::SubRequest| {
-                subreq_tx.send(req).unwrap();
-                subresp_rx.recv().unwrap()
-            });
-
-            let res = srv
-                .expand(
-                    lib,
-                    &env,
-                    current_dir,
-                    &macro_name,
-                    macro_body,
-                    attributes,
-                    def_site,
+    let res = srv
+        .expand(
+            lib,
+            &env,
+            current_dir,
+            &macro_name,
+            macro_body,
+            attributes,
+            def_site,
+            call_site,
+            mixed_site,
+            Some(&mut ProcMacroClientHandle::<C> { stdin, stdout, buf }),
+        )
+        .map(|it| {
+            (
+                legacy::FlatTree::from_tokenstream(
+                    it,
+                    CURRENT_API_VERSION,
                     call_site,
-                    mixed_site,
-                    Some(callback),
-                )
-                .map(|it| {
-                    (
-                        legacy::FlatTree::from_tokenstream(
-                            it,
-                            CURRENT_API_VERSION,
-                            call_site,
-                            &mut span_data_table,
-                        ),
-                        legacy::serialize_span_data_index_map(&span_data_table),
-                    )
-                })
-                .map(|(tree, span_data_table)| bidirectional::ExpandMacroExtended {
-                    tree,
-                    span_data_table,
-                })
-                .map_err(|e| legacy::PanicMessage(e.into_string().unwrap_or_default()));
+                    &mut span_data_table,
+                ),
+                legacy::serialize_span_data_index_map(&span_data_table),
+            )
+        })
+        .map(|(tree, span_data_table)| bidirectional::ExpandMacroExtended { tree, span_data_table })
+        .map_err(|e| legacy::PanicMessage(e.into_string().unwrap_or_default()));
 
-            let _ = result_tx.send(res);
-        });
-
-        loop {
-            if let Ok(res) = result_rx.try_recv() {
-                send_response::<_, C>(stdout, bidirectional::Response::ExpandMacroExtended(res))
-                    .unwrap();
-                break;
-            }
-
-            let subreq = match subreq_rx.recv() {
-                Ok(r) => r,
-                Err(_) => break,
-            };
-
-            let api_req = from_srv_req(subreq);
-            bidirectional::BidirectionalMessage::SubRequest(api_req).write::<_, C>(stdout).unwrap();
-
-            let resp = bidirectional::BidirectionalMessage::read::<_, C>(stdin, buf)
-                .unwrap()
-                .expect("client closed connection");
-
-            match resp {
-                bidirectional::BidirectionalMessage::SubResponse(api_resp) => {
-                    let srv_resp = from_client_res(api_resp);
-                    subresp_tx.send(srv_resp).unwrap();
-                }
-                other => panic!("expected SubResponse, got {other:?}"),
-            }
-        }
-    });
-
-    Ok(())
+    send_response::<C>(&stdout, bidirectional::Response::ExpandMacroExtended(res))
 }
 
 fn run_<C: Codec>() -> io::Result<()> {
@@ -425,26 +404,7 @@ fn run_<C: Codec>() -> io::Result<()> {
     Ok(())
 }
 
-fn from_srv_req(value: proc_macro_srv::SubRequest) -> bidirectional::SubRequest {
-    match value {
-        proc_macro_srv::SubRequest::SourceText { file_id, start, end } => {
-            bidirectional::SubRequest::SourceText { file_id: file_id.file_id().index(), start, end }
-        }
-    }
-}
-
-fn from_client_res(value: bidirectional::SubResponse) -> proc_macro_srv::SubResponse {
-    match value {
-        bidirectional::SubResponse::SourceTextResult { text } => {
-            proc_macro_srv::SubResponse::SourceTextResult { text }
-        }
-    }
-}
-
-fn send_response<W: std::io::Write, C: Codec>(
-    stdout: &mut W,
-    resp: bidirectional::Response,
-) -> io::Result<()> {
+fn send_response<C: Codec>(stdout: &io::Stdout, resp: bidirectional::Response) -> io::Result<()> {
     let resp = bidirectional::BidirectionalMessage::Response(resp);
-    resp.write::<W, C>(stdout)
+    resp.write::<_, C>(&mut stdout.lock())
 }
