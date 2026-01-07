@@ -50,9 +50,9 @@ use either::Either;
 use hir_def::{
     AdtId, AssocItemId, AssocItemLoc, BuiltinDeriveImplId, CallableDefId, ConstId, ConstParamId,
     DefWithBodyId, EnumId, EnumVariantId, ExternBlockId, ExternCrateId, FunctionId, GenericDefId,
-    GenericParamId, HasModule, ImplId, ItemContainerId, LifetimeParamId, LocalFieldId, Lookup,
-    MacroExpander, MacroId, StaticId, StructId, SyntheticSyntax, TupleId, TypeAliasId,
-    TypeOrConstParamId, TypeParamId, UnionId,
+    HasModule, ImplId, ItemContainerId, LifetimeParamId, LocalFieldId, Lookup, MacroExpander,
+    MacroId, StaticId, StructId, SyntheticSyntax, TupleId, TypeAliasId, TypeOrConstParamId,
+    TypeParamId, UnionId,
     attrs::AttrFlags,
     builtin_derive::BuiltinDeriveImplMethod,
     expr_store::{ExpressionStoreDiagnostics, ExpressionStoreSourceMap},
@@ -150,7 +150,7 @@ pub use {
         visibility::Visibility,
         // FIXME: This is here since some queries take it as input that are used
         // outside of hir.
-        {ModuleDefId, TraitId},
+        {GenericParamId, ModuleDefId, TraitId},
     },
     hir_expand::{
         EditionedFileId, ExpandResult, HirFileId, MacroCallId, MacroKind,
@@ -803,22 +803,21 @@ impl Module {
                 emit_def_diagnostic(db, acc, diag, edition, loc.container.krate(db));
             }
 
-            if impl_signature.target_trait.is_none()
-                && !is_inherent_impl_coherent(db, def_map, impl_id)
-            {
+            let trait_impl = impl_signature.target_trait.is_some();
+            if !trait_impl && !is_inherent_impl_coherent(db, def_map, impl_id) {
                 acc.push(IncoherentImpl { impl_: ast_id_map.get(loc.id.value), file_id }.into())
             }
 
-            if !impl_def.check_orphan_rules(db) {
+            if trait_impl && !impl_def.check_orphan_rules(db) {
                 acc.push(TraitImplOrphan { impl_: ast_id_map.get(loc.id.value), file_id }.into())
             }
 
-            let trait_ = impl_def.trait_(db);
+            let trait_ = trait_impl.then(|| impl_def.trait_(db)).flatten();
             let mut trait_is_unsafe = trait_.is_some_and(|t| t.is_unsafe(db));
             let impl_is_negative = impl_def.is_negative(db);
             let impl_is_unsafe = impl_def.is_unsafe(db);
 
-            let trait_is_unresolved = trait_.is_none() && impl_signature.target_trait.is_some();
+            let trait_is_unresolved = trait_.is_none() && trait_impl;
             if trait_is_unresolved {
                 // Ignore trait safety errors when the trait is unresolved, as otherwise we'll treat it as safe,
                 // which may not be correct.
@@ -917,6 +916,48 @@ impl Module {
                                 AssocItem::TypeAlias(it) => it.id.into(),
                             };
                             !hir_ty::dyn_compatibility::generics_require_sized_self(db, assoc_item)
+                        });
+                    }
+                }
+
+                // HACK: When specialization is enabled in the current crate, and there exists
+                // *any* blanket impl that provides a default implementation for the missing item,
+                // suppress the missing associated item diagnostic.
+                // This can lead to false negatives when the impl in question does not actually
+                // specialize that blanket impl, but determining the exact specialization
+                // relationship here would be significantly more expensive.
+                if !missing.is_empty() {
+                    let krate = self.krate(db).id;
+                    let def_map = crate_def_map(db, krate);
+                    if def_map.is_unstable_feature_enabled(&sym::specialization)
+                        || def_map.is_unstable_feature_enabled(&sym::min_specialization)
+                    {
+                        missing.retain(|(assoc_name, assoc_item)| {
+                            let AssocItem::Function(_) = assoc_item else {
+                                return true;
+                            };
+
+                            for &impl_ in TraitImpls::for_crate(db, krate).blanket_impls(trait_.id)
+                            {
+                                if impl_ == impl_id {
+                                    continue;
+                                }
+
+                                for (name, item) in &impl_.impl_items(db).items {
+                                    let AssocItemId::FunctionId(fn_) = item else {
+                                        continue;
+                                    };
+                                    if name != assoc_name {
+                                        continue;
+                                    }
+
+                                    if db.function_signature(*fn_).is_default() {
+                                        return false;
+                                    }
+                                }
+                            }
+
+                            true
                         });
                     }
                 }
@@ -3428,6 +3469,50 @@ impl Macro {
 
     pub fn is_derive(&self, db: &dyn HirDatabase) -> bool {
         matches!(self.kind(db), MacroKind::Derive | MacroKind::DeriveBuiltIn)
+    }
+
+    pub fn preferred_brace_style(&self, db: &dyn HirDatabase) -> Option<MacroBraces> {
+        let attrs = self.attrs(db);
+        MacroBraces::extract(attrs.attrs)
+    }
+}
+
+// Feature: Macro Brace Style Attribute
+// Crate authors can declare the preferred brace style for their macro. This will affect how completion
+// insert calls to it.
+//
+// This is only supported on function-like macros.
+//
+// To do that, insert the `#[rust_analyzer::macro_style(style)]` attribute on the macro (for proc macros,
+// insert it for the macro's function). `style` can be one of:
+//
+//  - `braces` for `{...}` style.
+//  - `brackets` for `[...]` style.
+//  - `parentheses` for `(...)` style.
+//
+// Malformed attributes will be ignored without warnings.
+//
+// Note that users have no way to override this attribute, so be careful and only include things
+// users definitely do not want to be completed!
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MacroBraces {
+    Braces,
+    Brackets,
+    Parentheses,
+}
+
+impl MacroBraces {
+    fn extract(attrs: AttrFlags) -> Option<Self> {
+        if attrs.contains(AttrFlags::MACRO_STYLE_BRACES) {
+            Some(Self::Braces)
+        } else if attrs.contains(AttrFlags::MACRO_STYLE_BRACKETS) {
+            Some(Self::Brackets)
+        } else if attrs.contains(AttrFlags::MACRO_STYLE_PARENTHESES) {
+            Some(Self::Parentheses)
+        } else {
+            None
+        }
     }
 }
 
