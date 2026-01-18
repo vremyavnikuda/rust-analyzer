@@ -44,10 +44,12 @@ pub mod version {
     pub const CURRENT_API_VERSION: u32 = HASHED_AST_ID;
 }
 
-#[derive(Copy, Clone)]
+/// Protocol format for communication between client and server.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolFormat {
+    /// JSON-based legacy protocol (newline-delimited JSON).
     JsonLegacy,
-    PostcardLegacy,
+    /// Bidirectional postcard protocol with sub-request support.
     BidirectionalPostcardPrototype,
 }
 
@@ -55,7 +57,6 @@ impl fmt::Display for ProtocolFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProtocolFormat::JsonLegacy => write!(f, "json-legacy"),
-            ProtocolFormat::PostcardLegacy => write!(f, "postcard-legacy"),
             ProtocolFormat::BidirectionalPostcardPrototype => {
                 write!(f, "bidirectional-postcard-prototype")
             }
