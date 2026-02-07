@@ -414,24 +414,30 @@ struct FlycheckActor {
     /// doesn't provide a way to read sub-process output without blocking, so we
     /// have to wrap sub-processes output handling in a thread and pass messages
     /// back over a channel.
-    command_handle: Option<CommandHandle<CargoCheckMessage>>,
+    command_handle: Option<CommandHandle<CheckMessage>>,
     /// The receiver side of the channel mentioned above.
-    command_receiver: Option<Receiver<CargoCheckMessage>>,
+    command_receiver: Option<Receiver<CheckMessage>>,
     diagnostics_cleared_for: FxHashSet<PackageSpecifier>,
     diagnostics_received: DiagnosticsReceived,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum DiagnosticsReceived {
-    Yes,
-    No,
-    YesAndClearedForAll,
+    /// We started a flycheck, but we haven't seen any diagnostics yet.
+    NotYet,
+    /// We received a non-zero number of diagnostics from rustc or clippy (via
+    /// cargo or custom check command). This means there were errors or
+    /// warnings.
+    AtLeastOne,
+    /// We received a non-zero number of diagnostics, and the scope is
+    /// workspace, so we've discarded the previous workspace diagnostics.
+    AtLeastOneAndClearedWorkspace,
 }
 
 #[allow(clippy::large_enum_variant)]
 enum Event {
     RequestStateChange(StateChange),
-    CheckEvent(Option<CargoCheckMessage>),
+    CheckEvent(Option<CheckMessage>),
 }
 
 /// This is stable behaviour. Don't change.
@@ -522,7 +528,7 @@ impl FlycheckActor {
             command_handle: None,
             command_receiver: None,
             diagnostics_cleared_for: Default::default(),
-            diagnostics_received: DiagnosticsReceived::No,
+            diagnostics_received: DiagnosticsReceived::NotYet,
         }
     }
 
@@ -580,7 +586,7 @@ impl FlycheckActor {
                     let (sender, receiver) = unbounded();
                     match CommandHandle::spawn(
                         command,
-                        CargoCheckParser,
+                        CheckParser,
                         sender,
                         match &self.config {
                             FlycheckConfig::Automatic { cargo_options, .. } => {
@@ -641,7 +647,7 @@ impl FlycheckActor {
                             error
                         );
                     }
-                    if self.diagnostics_received == DiagnosticsReceived::No {
+                    if self.diagnostics_received == DiagnosticsReceived::NotYet {
                         tracing::trace!(flycheck_id = self.id, "clearing diagnostics");
                         // We finished without receiving any diagnostics.
                         // Clear everything for good measure
@@ -700,7 +706,7 @@ impl FlycheckActor {
                     self.report_progress(Progress::DidFinish(res));
                 }
                 Event::CheckEvent(Some(message)) => match message {
-                    CargoCheckMessage::CompilerArtifact(msg) => {
+                    CheckMessage::CompilerArtifact(msg) => {
                         tracing::trace!(
                             flycheck_id = self.id,
                             artifact = msg.target.name,
@@ -730,46 +736,75 @@ impl FlycheckActor {
                             });
                         }
                     }
-                    CargoCheckMessage::Diagnostic { diagnostic, package_id } => {
+                    CheckMessage::Diagnostic { diagnostic, package_id } => {
                         tracing::trace!(
                             flycheck_id = self.id,
                             message = diagnostic.message,
                             package_id = package_id.as_ref().map(|it| it.as_str()),
+                            scope = ?self.scope,
                             "diagnostic received"
                         );
-                        if self.diagnostics_received == DiagnosticsReceived::No {
-                            self.diagnostics_received = DiagnosticsReceived::Yes;
-                        }
-                        if let Some(package_id) = &package_id {
-                            if self.diagnostics_cleared_for.insert(package_id.clone()) {
-                                tracing::trace!(
-                                    flycheck_id = self.id,
-                                    package_id = package_id.as_str(),
-                                    "clearing diagnostics"
-                                );
-                                self.send(FlycheckMessage::ClearDiagnostics {
+
+                        match &self.scope {
+                            FlycheckScope::Workspace => {
+                                if self.diagnostics_received == DiagnosticsReceived::NotYet {
+                                    self.send(FlycheckMessage::ClearDiagnostics {
+                                        id: self.id,
+                                        kind: ClearDiagnosticsKind::All(ClearScope::Workspace),
+                                    });
+
+                                    self.diagnostics_received =
+                                        DiagnosticsReceived::AtLeastOneAndClearedWorkspace;
+                                }
+
+                                if let Some(package_id) = package_id {
+                                    tracing::warn!(
+                                        "Ignoring package label {:?} and applying diagnostics to the whole workspace",
+                                        package_id
+                                    );
+                                }
+
+                                self.send(FlycheckMessage::AddDiagnostic {
                                     id: self.id,
-                                    kind: ClearDiagnosticsKind::All(ClearScope::Package(
-                                        package_id.clone(),
-                                    )),
+                                    generation: self.generation,
+                                    package_id: None,
+                                    workspace_root: self.root.clone(),
+                                    diagnostic,
                                 });
                             }
-                        } else if self.diagnostics_received
-                            != DiagnosticsReceived::YesAndClearedForAll
-                        {
-                            self.diagnostics_received = DiagnosticsReceived::YesAndClearedForAll;
-                            self.send(FlycheckMessage::ClearDiagnostics {
-                                id: self.id,
-                                kind: ClearDiagnosticsKind::All(ClearScope::Workspace),
-                            });
+                            FlycheckScope::Package { package: flycheck_package, .. } => {
+                                if self.diagnostics_received == DiagnosticsReceived::NotYet {
+                                    self.diagnostics_received = DiagnosticsReceived::AtLeastOne;
+                                }
+
+                                // If the package has been set in the diagnostic JSON, respect that. Otherwise, use the
+                                // package that the current flycheck is scoped to. This is useful when a project is
+                                // directly using rustc for its checks (e.g. custom check commands in rust-project.json).
+                                let package_id = package_id.unwrap_or(flycheck_package.clone());
+
+                                if self.diagnostics_cleared_for.insert(package_id.clone()) {
+                                    tracing::trace!(
+                                        flycheck_id = self.id,
+                                        package_id = package_id.as_str(),
+                                        "clearing diagnostics"
+                                    );
+                                    self.send(FlycheckMessage::ClearDiagnostics {
+                                        id: self.id,
+                                        kind: ClearDiagnosticsKind::All(ClearScope::Package(
+                                            package_id.clone(),
+                                        )),
+                                    });
+                                }
+
+                                self.send(FlycheckMessage::AddDiagnostic {
+                                    id: self.id,
+                                    generation: self.generation,
+                                    package_id: Some(package_id),
+                                    workspace_root: self.root.clone(),
+                                    diagnostic,
+                                });
+                            }
                         }
-                        self.send(FlycheckMessage::AddDiagnostic {
-                            id: self.id,
-                            generation: self.generation,
-                            package_id,
-                            workspace_root: self.root.clone(),
-                            diagnostic,
-                        });
                     }
                 },
             }
@@ -793,7 +828,7 @@ impl FlycheckActor {
 
     fn clear_diagnostics_state(&mut self) {
         self.diagnostics_cleared_for.clear();
-        self.diagnostics_received = DiagnosticsReceived::No;
+        self.diagnostics_received = DiagnosticsReceived::NotYet;
     }
 
     fn explicit_check_command(
@@ -943,15 +978,18 @@ impl FlycheckActor {
 }
 
 #[allow(clippy::large_enum_variant)]
-enum CargoCheckMessage {
+enum CheckMessage {
+    /// A message from `cargo check`, including details like the path
+    /// to the relevant `Cargo.toml`.
     CompilerArtifact(cargo_metadata::Artifact),
+    /// A diagnostic message from rustc itself.
     Diagnostic { diagnostic: Diagnostic, package_id: Option<PackageSpecifier> },
 }
 
-struct CargoCheckParser;
+struct CheckParser;
 
-impl JsonLinesParser<CargoCheckMessage> for CargoCheckParser {
-    fn from_line(&self, line: &str, error: &mut String) -> Option<CargoCheckMessage> {
+impl JsonLinesParser<CheckMessage> for CheckParser {
+    fn from_line(&self, line: &str, error: &mut String) -> Option<CheckMessage> {
         let mut deserializer = serde_json::Deserializer::from_str(line);
         deserializer.disable_recursion_limit();
         if let Ok(message) = JsonMessage::deserialize(&mut deserializer) {
@@ -959,10 +997,10 @@ impl JsonLinesParser<CargoCheckMessage> for CargoCheckParser {
                 // Skip certain kinds of messages to only spend time on what's useful
                 JsonMessage::Cargo(message) => match message {
                     cargo_metadata::Message::CompilerArtifact(artifact) if !artifact.fresh => {
-                        Some(CargoCheckMessage::CompilerArtifact(artifact))
+                        Some(CheckMessage::CompilerArtifact(artifact))
                     }
                     cargo_metadata::Message::CompilerMessage(msg) => {
-                        Some(CargoCheckMessage::Diagnostic {
+                        Some(CheckMessage::Diagnostic {
                             diagnostic: msg.message,
                             package_id: Some(PackageSpecifier::Cargo {
                                 package_id: Arc::new(msg.package_id),
@@ -972,7 +1010,7 @@ impl JsonLinesParser<CargoCheckMessage> for CargoCheckParser {
                     _ => None,
                 },
                 JsonMessage::Rustc(message) => {
-                    Some(CargoCheckMessage::Diagnostic { diagnostic: message, package_id: None })
+                    Some(CheckMessage::Diagnostic { diagnostic: message, package_id: None })
                 }
             };
         }
@@ -982,7 +1020,7 @@ impl JsonLinesParser<CargoCheckMessage> for CargoCheckParser {
         None
     }
 
-    fn from_eof(&self) -> Option<CargoCheckMessage> {
+    fn from_eof(&self) -> Option<CheckMessage> {
         None
     }
 }
