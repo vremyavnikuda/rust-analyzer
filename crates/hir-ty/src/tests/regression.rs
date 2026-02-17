@@ -2363,7 +2363,6 @@ fn test() {
 }
 "#,
         expect![[r#"
-            46..49 'Foo': Foo<N>
             93..97 'self': Foo<N>
             108..125 '{     ...     }': usize
             118..119 'N': usize
@@ -2756,5 +2755,18 @@ where
             691..698 'loop {}': !
             696..698 '{}': ()
         "#]],
+    );
+}
+
+#[test]
+fn extern_fns_cannot_have_param_patterns() {
+    check_no_mismatches(
+        r#"
+pub(crate) struct Builder<'a>(&'a ());
+
+unsafe extern "C"  {
+    pub(crate) fn foo<'a>(Builder: &Builder<'a>);
+}
+    "#,
     );
 }
