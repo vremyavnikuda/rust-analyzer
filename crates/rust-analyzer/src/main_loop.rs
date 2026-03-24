@@ -303,15 +303,6 @@ impl GlobalState {
         .map(Some)
     }
 
-    fn trigger_garbage_collection(&mut self) {
-        if cfg!(test) {
-            // Slow tests run the main loop in multiple threads, but GC isn't thread safe.
-            return;
-        }
-
-        self.analysis_host.trigger_garbage_collection();
-    }
-
     fn handle_event(&mut self, event: Event) {
         let loop_start = Instant::now();
         let _p = tracing::info_span!("GlobalState::handle_event", event = %event).entered();
@@ -392,7 +383,7 @@ impl GlobalState {
                             ));
                         }
                         PrimeCachesProgress::End { cancelled } => {
-                            self.trigger_garbage_collection();
+                            self.analysis_host.trigger_garbage_collection();
                             self.prime_caches_queue.op_completed(());
                             if cancelled {
                                 self.prime_caches_queue
@@ -551,7 +542,7 @@ impl GlobalState {
                 && self.fmt_pool.handle.is_empty()
                 && current_revision != self.last_gc_revision
             {
-                self.trigger_garbage_collection();
+                self.analysis_host.trigger_garbage_collection();
                 self.last_gc_revision = current_revision;
             }
         }
@@ -1187,6 +1178,8 @@ impl GlobalState {
             } => self.diagnostics.clear_check_older_than_for_package(id, package_id, generation),
             FlycheckMessage::Progress { id, progress } => {
                 let format_with_id = |user_facing_command: String| {
+                    // When we're running multiple flychecks, we have to include a disambiguator in
+                    // the title, or the editor complains. Note that this is a user-facing string.
                     if self.flycheck.len() == 1 {
                         user_facing_command
                     } else {
