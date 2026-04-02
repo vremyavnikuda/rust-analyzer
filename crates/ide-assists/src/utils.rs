@@ -103,11 +103,11 @@ pub(crate) fn wrap_paren(expr: ast::Expr, make: &SyntaxFactory, prec: ExprPreced
 }
 
 pub(crate) fn wrap_paren_in_call(expr: ast::Expr, make: &SyntaxFactory) -> ast::Expr {
-    if needs_parens_in_call(&expr) { make.expr_paren(expr).into() } else { expr }
+    if needs_parens_in_call(make, &expr) { make.expr_paren(expr).into() } else { expr }
 }
 
-fn needs_parens_in_call(param: &ast::Expr) -> bool {
-    let call = make::expr_call(make::ext::expr_unit(), make::arg_list(Vec::new()));
+fn needs_parens_in_call(make: &SyntaxFactory, param: &ast::Expr) -> bool {
+    let call = make.expr_call(make.expr_unit(), make.arg_list(Vec::new()));
     let callable = call.expr().expect("invalid make call");
     param.needs_parens_in_place_of(call.syntax(), callable.syntax())
 }
@@ -203,11 +203,9 @@ pub fn filter_assoc_items(
 /// [`filter_assoc_items()`]), clones each item for update and applies path transformation to it,
 /// then inserts into `impl_`. Returns the modified `impl_` and the first associated item that got
 /// inserted.
-///
-/// Legacy: prefer [`add_trait_assoc_items_to_impl_with_factory`] when a [`SyntaxFactory`] is
-/// available.
 #[must_use]
 pub fn add_trait_assoc_items_to_impl(
+    make: &SyntaxFactory,
     sema: &Semantics<'_, RootDatabase>,
     config: &AssistConfig,
     original_items: &[InFile<ast::AssocItem>],
@@ -251,80 +249,11 @@ pub fn add_trait_assoc_items_to_impl(
         .filter_map(|item| match item {
             ast::AssocItem::Fn(fn_) if fn_.body().is_none() => {
                 let fn_ = fn_.clone_subtree();
-                let new_body = make::block_expr(None, Some(expr_fill_default(config)));
-                let mut fn_editor = SyntaxEditor::new(fn_.syntax().clone());
-                fn_.replace_or_insert_body(&mut fn_editor, new_body.clone_for_update());
-                let new_fn_ = fn_editor.finish().new_root().clone();
-                ast::AssocItem::cast(new_fn_)
-            }
-            ast::AssocItem::TypeAlias(type_alias) => {
-                let type_alias = type_alias.clone_subtree();
-                if let Some(type_bound_list) = type_alias.type_bound_list() {
-                    let mut type_alias_editor = SyntaxEditor::new(type_alias.syntax().clone());
-                    type_bound_list.remove(&mut type_alias_editor);
-                    let type_alias = type_alias_editor.finish().new_root().clone();
-                    ast::AssocItem::cast(type_alias)
-                } else {
-                    Some(ast::AssocItem::TypeAlias(type_alias))
-                }
-            }
-            item => Some(item),
-        })
-        .map(|item| AstNodeEdit::indent(&item, new_indent_level))
-        .collect()
-}
-
-/// [`SyntaxFactory`]-based variant of [`add_trait_assoc_items_to_impl`].
-#[must_use]
-pub fn add_trait_assoc_items_to_impl_with_factory(
-    make: &SyntaxFactory,
-    sema: &Semantics<'_, RootDatabase>,
-    config: &AssistConfig,
-    original_items: &[InFile<ast::AssocItem>],
-    trait_: hir::Trait,
-    impl_: &ast::Impl,
-    target_scope: &hir::SemanticsScope<'_>,
-) -> Vec<ast::AssocItem> {
-    let new_indent_level = IndentLevel::from_node(impl_.syntax()) + 1;
-    original_items
-        .iter()
-        .map(|InFile { file_id, value: original_item }| {
-            let mut cloned_item = {
-                if let Some(macro_file) = file_id.macro_file() {
-                    let span_map = sema.db.expansion_span_map(macro_file);
-                    let item_prettified = prettify_macro_expansion(
-                        sema.db,
-                        original_item.syntax().clone(),
-                        &span_map,
-                        target_scope.krate().into(),
-                    );
-                    if let Some(formatted) = ast::AssocItem::cast(item_prettified) {
-                        return formatted;
-                    } else {
-                        stdx::never!("formatted `AssocItem` could not be cast back to `AssocItem`");
-                    }
-                }
-                original_item
-            }
-            .reset_indent();
-
-            if let Some(source_scope) = sema.scope(original_item.syntax()) {
-                let transform =
-                    PathTransform::trait_impl(target_scope, &source_scope, trait_, impl_.clone());
-                cloned_item = ast::AssocItem::cast(transform.apply(cloned_item.syntax())).unwrap();
-            }
-            cloned_item.remove_attrs_and_docs();
-            cloned_item
-        })
-        .filter_map(|item| match item {
-            ast::AssocItem::Fn(fn_) if fn_.body().is_none() => {
-                let fn_ = fn_.clone_subtree();
                 let fill_expr: ast::Expr = match config.expr_fill_default {
                     ExprFillDefaultMode::Todo | ExprFillDefaultMode::Default => make.expr_todo(),
                     ExprFillDefaultMode::Underscore => make.expr_underscore().into(),
                 };
                 let new_body = make.block_expr(None::<ast::Stmt>, Some(fill_expr));
-                let new_body = AstNodeEdit::indent(&new_body, IndentLevel::single());
                 let mut fn_editor = SyntaxEditor::new(fn_.syntax().clone());
                 fn_.replace_or_insert_body(&mut fn_editor, new_body);
                 let new_fn_ = fn_editor.finish().new_root().clone();
@@ -630,29 +559,6 @@ pub(crate) fn generate_impl_text(adt: &ast::Adt, code: &str) -> String {
     generate_impl_text_inner(adt, None, true, code)
 }
 
-/// Generates the surrounding `impl <trait> for Type { <code> }` including type
-/// and lifetime parameters, with `<trait>` appended to `impl`'s generic parameters' bounds.
-///
-/// This is useful for traits like `PartialEq`, since `impl<T> PartialEq for U<T>` often requires `T: PartialEq`.
-// FIXME: migrate remaining uses to `generate_trait_impl`
-#[allow(dead_code)]
-pub(crate) fn generate_trait_impl_text(adt: &ast::Adt, trait_text: &str, code: &str) -> String {
-    generate_impl_text_inner(adt, Some(trait_text), true, code)
-}
-
-/// Generates the surrounding `impl <trait> for Type { <code> }` including type
-/// and lifetime parameters, with `impl`'s generic parameters' bounds kept as-is.
-///
-/// This is useful for traits like `From<T>`, since `impl<T> From<T> for U<T>` doesn't require `T: From<T>`.
-// FIXME: migrate remaining uses to `generate_trait_impl_intransitive`
-pub(crate) fn generate_trait_impl_text_intransitive(
-    adt: &ast::Adt,
-    trait_text: &str,
-    code: &str,
-) -> String {
-    generate_impl_text_inner(adt, Some(trait_text), false, code)
-}
-
 fn generate_impl_text_inner(
     adt: &ast::Adt,
     trait_text: Option<&str>,
@@ -733,10 +639,15 @@ fn generate_impl_text_inner(
 /// Generates the corresponding `impl Type {}` including type and lifetime
 /// parameters.
 pub(crate) fn generate_impl_with_item(
+    make: &SyntaxFactory,
     adt: &ast::Adt,
     body: Option<ast::AssocItemList>,
 ) -> ast::Impl {
-    generate_impl_inner(false, adt, None, true, body)
+    generate_impl_inner_with_factory(make, false, adt, None, true, body)
+}
+
+pub(crate) fn generate_impl_with_factory(make: &SyntaxFactory, adt: &ast::Adt) -> ast::Impl {
+    generate_impl_inner_with_factory(make, false, adt, None, true, None)
 }
 
 pub(crate) fn generate_impl(adt: &ast::Adt) -> ast::Impl {
@@ -760,8 +671,31 @@ pub(crate) fn generate_trait_impl(
 /// and lifetime parameters, with `impl`'s generic parameters' bounds kept as-is.
 ///
 /// This is useful for traits like `From<T>`, since `impl<T> From<T> for U<T>` doesn't require `T: From<T>`.
-pub(crate) fn generate_trait_impl_intransitive(adt: &ast::Adt, trait_: ast::Type) -> ast::Impl {
-    generate_impl_inner(false, adt, Some(trait_), false, None)
+pub(crate) fn generate_trait_impl_intransitive(
+    make: &SyntaxFactory,
+    adt: &ast::Adt,
+    trait_: ast::Type,
+) -> ast::Impl {
+    generate_impl_inner_with_factory(make, false, adt, Some(trait_), false, None)
+}
+
+pub(crate) fn generate_trait_impl_intransitive_with_item(
+    make: &SyntaxFactory,
+    adt: &ast::Adt,
+    trait_: ast::Type,
+    body: ast::AssocItemList,
+) -> ast::Impl {
+    generate_impl_inner_with_factory(make, false, adt, Some(trait_), false, Some(body))
+}
+
+pub(crate) fn generate_trait_impl_with_item(
+    make: &SyntaxFactory,
+    is_unsafe: bool,
+    adt: &ast::Adt,
+    trait_: ast::Type,
+    body: ast::AssocItemList,
+) -> ast::Impl {
+    generate_impl_inner_with_factory(make, is_unsafe, adt, Some(trait_), true, Some(body))
 }
 
 fn generate_impl_inner(
@@ -1041,8 +975,8 @@ enum ReferenceConversionType {
 }
 
 impl<'db> ReferenceConversion<'db> {
-    pub(crate) fn convert_type(&self, db: &'db dyn HirDatabase, module: hir::Module) -> ast::Type {
-        let ty = match self.conversion {
+    fn type_to_string(&self, db: &'db dyn HirDatabase, module: hir::Module) -> String {
+        match self.conversion {
             ReferenceConversionType::Copy => self
                 .ty
                 .display_source_code(db, module.into(), true)
@@ -1092,25 +1026,38 @@ impl<'db> ReferenceConversion<'db> {
                     .unwrap_or_else(|_| "_".to_owned());
                 format!("Result<&{first_type_argument_name}, &{second_type_argument_name}>")
             }
-        };
+        }
+    }
 
+    pub(crate) fn convert_type(&self, db: &'db dyn HirDatabase, module: hir::Module) -> ast::Type {
+        let ty = self.type_to_string(db, module);
         make::ty(&ty)
     }
 
-    pub(crate) fn getter(&self, field_name: String) -> ast::Expr {
-        let expr = make::expr_field(make::ext::expr_self(), &field_name);
+    pub(crate) fn convert_type_with_factory(
+        &self,
+        make: &SyntaxFactory,
+        db: &'db dyn HirDatabase,
+        module: hir::Module,
+    ) -> ast::Type {
+        let ty = self.type_to_string(db, module);
+        make.ty(&ty)
+    }
+
+    pub(crate) fn getter(&self, make: &SyntaxFactory, field_name: String) -> ast::Expr {
+        let expr = make.expr_field(make.expr_self(), &field_name);
 
         match self.conversion {
-            ReferenceConversionType::Copy => expr,
+            ReferenceConversionType::Copy => expr.into(),
             ReferenceConversionType::AsRefStr
             | ReferenceConversionType::AsRefSlice
             | ReferenceConversionType::Dereferenced
             | ReferenceConversionType::Option
             | ReferenceConversionType::Result => {
                 if self.impls_deref {
-                    make::expr_ref(expr, false)
+                    make.expr_ref(expr.into(), false)
                 } else {
-                    make::expr_method_call(expr, make::name_ref("as_ref"), make::arg_list([]))
+                    make.expr_method_call(expr.into(), make.name_ref("as_ref"), make.arg_list([]))
                         .into()
                 }
             }

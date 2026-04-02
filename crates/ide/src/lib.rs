@@ -63,6 +63,7 @@ use std::panic::{AssertUnwindSafe, UnwindSafe};
 use cfg::CfgOptions;
 use fetch_crates::CrateInfo;
 use hir::{ChangeWithProcMacros, EditionedFileId, crate_def_map, sym};
+use ide_db::ra_fixture::RaFixtureAnalysis;
 use ide_db::{
     FxHashMap, FxIndexSet, LineIndexDatabase,
     base_db::{
@@ -71,7 +72,6 @@ use ide_db::{
     },
     prime_caches, symbol_index,
 };
-use ide_db::{MiniCore, ra_fixture::RaFixtureAnalysis};
 use macros::UpmapFromRaFixture;
 use syntax::{AstNode, SourceFile, ast};
 use triomphe::Arc;
@@ -96,7 +96,7 @@ pub use crate::{
         AdjustmentHints, AdjustmentHintsMode, ClosureReturnTypeHints, DiscriminantHints,
         GenericParameterHints, InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart,
         InlayHintPosition, InlayHintsConfig, InlayKind, InlayTooltip, LazyProperty,
-        LifetimeElisionHints,
+        LifetimeElisionHints, TypeHintsPlacement,
     },
     join_lines::JoinLinesConfig,
     markup::Markup,
@@ -135,6 +135,7 @@ pub use ide_db::{
     label::Label,
     line_index::{LineCol, LineIndex},
     prime_caches::ParallelPrimeCachesProgress,
+    ra_fixture::RaFixtureConfig,
     search::{ReferenceCategory, SearchScope},
     source_change::{FileSystemEdit, SnippetEdit, SourceChange},
     symbol_index::Query,
@@ -289,9 +290,9 @@ impl Analysis {
         sema: &Semantics<'_, RootDatabase>,
         literal: ast::String,
         expanded: &ast::String,
-        minicore: MiniCore<'_>,
+        config: &RaFixtureConfig<'_>,
     ) -> Option<(Analysis, RaFixtureAnalysis)> {
-        Self::from_ra_fixture_with_on_cursor(sema, literal, expanded, minicore, &mut |_| {})
+        Self::from_ra_fixture_with_on_cursor(sema, literal, expanded, config, &mut |_| {})
     }
 
     /// Like [`Analysis::from_ra_fixture()`], but also calls `on_cursor` with the cursor position.
@@ -299,11 +300,11 @@ impl Analysis {
         sema: &Semantics<'_, RootDatabase>,
         literal: ast::String,
         expanded: &ast::String,
-        minicore: MiniCore<'_>,
+        config: &RaFixtureConfig<'_>,
         on_cursor: &mut dyn FnMut(TextRange),
     ) -> Option<(Analysis, RaFixtureAnalysis)> {
         let analysis =
-            RaFixtureAnalysis::analyze_ra_fixture(sema, literal, expanded, minicore, on_cursor)?;
+            RaFixtureAnalysis::analyze_ra_fixture(sema, literal, expanded, config, on_cursor)?;
         Some((Analysis { db: analysis.db.clone() }, analysis))
     }
 
@@ -499,11 +500,14 @@ impl Analysis {
     }
 
     /// Returns the set of folding ranges.
-    pub fn folding_ranges(&self, file_id: FileId) -> Cancellable<Vec<Fold>> {
+    pub fn folding_ranges(&self, file_id: FileId, collapsed_text: bool) -> Cancellable<Vec<Fold>> {
         self.with_db(|db| {
             let editioned_file_id_wrapper = EditionedFileId::current_edition(&self.db, file_id);
 
-            folding_ranges::folding_ranges(&db.parse(editioned_file_id_wrapper).tree())
+            folding_ranges::folding_ranges(
+                &db.parse(editioned_file_id_wrapper).tree(),
+                collapsed_text,
+            )
         })
     }
 

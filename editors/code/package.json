@@ -31,6 +31,9 @@
         "vscode": "^1.93.0"
     },
     "enabledApiProposals": [],
+    "extensionKind": [
+        "workspace"
+    ],
     "scripts": {
         "vscode:prepublish": "npm run build-base -- --minify",
         "package": "vsce package -o rust-analyzer.vsix",
@@ -64,12 +67,12 @@
         "@typescript-eslint/eslint-plugin": "^8.25.0",
         "@typescript-eslint/parser": "^8.25.0",
         "@vscode/test-electron": "^2.4.1",
-        "@vscode/vsce": "^3.6.0",
+        "@vscode/vsce": "^3.7.1",
         "esbuild": "^0.25.0",
         "eslint": "^9.21.0",
         "eslint-config-prettier": "^10.0.2",
         "eslint-define-config": "^2.1.0",
-        "ovsx": "0.10.1",
+        "ovsx": "0.10.10",
         "prettier": "^3.5.2",
         "tslib": "^2.8.1",
         "typescript": "^5.7.3",
@@ -1592,6 +1595,16 @@
                 }
             },
             {
+                "title": "rust-analyzer",
+                "properties": {
+                    "rust-analyzer.disableFixtureSupport": {
+                        "markdownDescription": "Disable support for `#[rust_analyzer::rust_fixture]` snippets.\n\nIf you are not working on rust-analyzer itself, you should ignore this config.",
+                        "default": false,
+                        "type": "boolean"
+                    }
+                }
+            },
+            {
                 "title": "Document",
                 "properties": {
                     "rust-analyzer.document.symbol.search.excludeLocals": {
@@ -2498,6 +2511,24 @@
                         "markdownDescription": "Hide inlay type hints for constructors.",
                         "default": false,
                         "type": "boolean"
+                    }
+                }
+            },
+            {
+                "title": "Inlay Hints",
+                "properties": {
+                    "rust-analyzer.inlayHints.typeHints.location": {
+                        "markdownDescription": "Where to render type hints relative to their binding pattern.",
+                        "default": "inline",
+                        "type": "string",
+                        "enum": [
+                            "inline",
+                            "end_of_line"
+                        ],
+                        "enumDescriptions": [
+                            "Render type hints directly after the binding identifier.",
+                            "Render type hints after the end of the containing `let` statement when possible."
+                        ]
                     }
                 }
             },

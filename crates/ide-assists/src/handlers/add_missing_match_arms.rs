@@ -80,9 +80,16 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
     let module = scope.module();
     let cfg = ctx.config.find_path_config(ctx.sema.is_nightly(scope.krate()));
     let self_ty = if ctx.config.prefer_self_ty {
-        scope
-            .containing_function()
-            .and_then(|function| function.as_assoc_item(ctx.db())?.implementing_ty(ctx.db()))
+        scope.expression_store_owner().and_then(|def| {
+            match def {
+                hir::ExpressionStoreOwner::Body(def_with_body) => {
+                    def_with_body.as_assoc_item(ctx.db())
+                }
+                hir::ExpressionStoreOwner::Signature(def) => def.as_assoc_item(ctx.db()),
+                hir::ExpressionStoreOwner::VariantFields(_) => None,
+            }?
+            .implementing_ty(ctx.db())
+        })
     } else {
         None
     };
@@ -471,7 +478,7 @@ enum ExtendedEnum {
 enum ExtendedVariant {
     True,
     False,
-    Variant { variant: hir::Variant, use_self: bool },
+    Variant { variant: hir::EnumVariant, use_self: bool },
 }
 
 impl ExtendedVariant {

@@ -18,6 +18,7 @@ use hir_expand::{
 };
 use intern::{Symbol, sym};
 use rustc_hash::FxHashMap;
+use smallvec::smallvec;
 use stdx::never;
 use syntax::{
     AstNode, AstPtr, SyntaxNodePtr,
@@ -28,7 +29,6 @@ use syntax::{
     },
 };
 use thin_vec::ThinVec;
-use triomphe::Arc;
 use tt::TextRange;
 
 use crate::{
@@ -37,9 +37,9 @@ use crate::{
     attrs::AttrFlags,
     db::DefDatabase,
     expr_store::{
-        Body, BodySourceMap, ConstExprOrigin, ExprPtr, ExpressionStore, ExpressionStoreBuilder,
+        Body, BodySourceMap, ExprPtr, ExpressionStore, ExpressionStoreBuilder,
         ExpressionStoreDiagnostics, ExpressionStoreSourceMap, HygieneId, LabelPtr, LifetimePtr,
-        PatPtr, TypePtr,
+        PatPtr, RootExprOrigin, TypePtr,
         expander::Expander,
         lower::generics::ImplTraitLowerFn,
         path::{AssociatedTypeBinding, GenericArg, GenericArgs, GenericArgsParentheses, Path},
@@ -53,6 +53,7 @@ use crate::{
     item_tree::FieldsShape,
     lang_item::{LangItemTarget, LangItems},
     nameres::{DefMap, LocalDefMap, MacroSubNs, block_def_map},
+    signatures::StructSignature,
     type_ref::{
         ArrayType, ConstRef, FnType, LifetimeRef, LifetimeRefId, Mutability, PathId, Rawness,
         RefType, TraitBoundModifier, TraitRef, TypeBound, TypeRef, TypeRefId, UseArgRef,
@@ -117,9 +118,10 @@ pub(super) fn lower_body(
             params = (0..count).map(|_| collector.missing_pat()).collect();
         };
         let body_expr = collector.missing_expr();
+        collector.store.inference_roots = Some(smallvec![(body_expr, RootExprOrigin::BodyRoot)]);
         let (store, source_map) = collector.store.finish();
         return (
-            Body { store, params: params.into_boxed_slice(), self_param, body_expr },
+            Body { store, params: params.into_boxed_slice(), self_param },
             BodySourceMap { self_param: source_map_self_param, store: source_map },
         );
     }
@@ -173,10 +175,11 @@ pub(super) fn lower_body(
             }
         },
     );
+    collector.store.inference_roots = Some(smallvec![(body_expr, RootExprOrigin::BodyRoot)]);
 
     let (store, source_map) = collector.store.finish();
     (
-        Body { store, params: params.into_boxed_slice(), self_param, body_expr },
+        Body { store, params: params.into_boxed_slice(), self_param },
         BodySourceMap { self_param: source_map_self_param, store: source_map },
     )
 }
@@ -200,13 +203,13 @@ pub(crate) fn lower_generic_params(
     file_id: HirFileId,
     param_list: Option<ast::GenericParamList>,
     where_clause: Option<ast::WhereClause>,
-) -> (Arc<ExpressionStore>, Arc<GenericParams>, ExpressionStoreSourceMap) {
+) -> (ExpressionStore, GenericParams, ExpressionStoreSourceMap) {
     let mut expr_collector = ExprCollector::signature(db, module, file_id);
     let mut collector = generics::GenericParamsCollector::new(def);
     collector.lower(&mut expr_collector, param_list, where_clause);
     let params = collector.finish();
     let (store, source_map) = expr_collector.store.finish();
-    (Arc::new(store), params, source_map)
+    (store, params, source_map)
 }
 
 pub(crate) fn lower_impl(
@@ -214,7 +217,7 @@ pub(crate) fn lower_impl(
     module: ModuleId,
     impl_syntax: InFile<ast::Impl>,
     impl_id: ImplId,
-) -> (ExpressionStore, ExpressionStoreSourceMap, TypeRefId, Option<TraitRef>, Arc<GenericParams>) {
+) -> (ExpressionStore, ExpressionStoreSourceMap, TypeRefId, Option<TraitRef>, GenericParams) {
     let mut expr_collector = ExprCollector::signature(db, module, impl_syntax.file_id);
     let self_ty =
         expr_collector.lower_type_ref_opt_disallow_impl_trait(impl_syntax.value.self_ty());
@@ -242,7 +245,7 @@ pub(crate) fn lower_trait(
     module: ModuleId,
     trait_syntax: InFile<ast::Trait>,
     trait_id: TraitId,
-) -> (ExpressionStore, ExpressionStoreSourceMap, Arc<GenericParams>) {
+) -> (ExpressionStore, ExpressionStoreSourceMap, GenericParams) {
     let mut expr_collector = ExprCollector::signature(db, module, trait_syntax.file_id);
     let mut collector = generics::GenericParamsCollector::with_self_param(
         &mut expr_collector,
@@ -264,13 +267,8 @@ pub(crate) fn lower_type_alias(
     module: ModuleId,
     alias: InFile<ast::TypeAlias>,
     type_alias_id: TypeAliasId,
-) -> (
-    ExpressionStore,
-    ExpressionStoreSourceMap,
-    Arc<GenericParams>,
-    Box<[TypeBound]>,
-    Option<TypeRefId>,
-) {
+) -> (ExpressionStore, ExpressionStoreSourceMap, GenericParams, Box<[TypeBound]>, Option<TypeRefId>)
+{
     let mut expr_collector = ExprCollector::signature(db, module, alias.file_id);
     let bounds = alias
         .value
@@ -307,7 +305,7 @@ pub(crate) fn lower_function(
 ) -> (
     ExpressionStore,
     ExpressionStoreSourceMap,
-    Arc<GenericParams>,
+    GenericParams,
     Box<[TypeRefId]>,
     Option<TypeRefId>,
     bool,
@@ -419,7 +417,7 @@ pub(crate) fn lower_function(
 pub struct ExprCollector<'db> {
     db: &'db dyn DefDatabase,
     cfg_options: &'db CfgOptions,
-    expander: Expander,
+    expander: Expander<'db>,
     def_map: &'db DefMap,
     local_def_map: &'db LocalDefMap,
     module: ModuleId,
@@ -540,7 +538,7 @@ impl<'db> ExprCollector<'db> {
         current_file_id: HirFileId,
     ) -> ExprCollector<'_> {
         let mut this = Self::body(db, module, current_file_id);
-        this.store.const_expr_origins = Some(Default::default());
+        this.store.inference_roots = Some(Default::default());
         this
     }
 
@@ -640,8 +638,8 @@ impl<'db> ExprCollector<'db> {
             }
             ast::Type::ArrayType(inner) => {
                 let len = self.lower_const_arg_opt(inner.const_arg());
-                if let Some(const_expr_origins) = &mut self.store.const_expr_origins {
-                    const_expr_origins.push((len.expr, ConstExprOrigin::ArrayLength));
+                if let Some(const_expr_origins) = &mut self.store.inference_roots {
+                    const_expr_origins.push((len.expr, RootExprOrigin::ArrayLength));
                 }
                 TypeRef::Array(ArrayType {
                     ty: self.lower_type_ref_opt(inner.ty(), impl_trait_lower_fn),
@@ -927,8 +925,8 @@ impl<'db> ExprCollector<'db> {
                 }
                 ast::GenericArg::ConstArg(arg) => {
                     let arg = self.lower_const_arg(arg);
-                    if let Some(const_expr_origins) = &mut self.store.const_expr_origins {
-                        const_expr_origins.push((arg.expr, ConstExprOrigin::GenericArgsPath));
+                    if let Some(const_expr_origins) = &mut self.store.inference_roots {
+                        const_expr_origins.push((arg.expr, RootExprOrigin::GenericArgsPath));
                     }
                     args.push(GenericArg::Const(arg))
                 }
@@ -1070,16 +1068,16 @@ impl<'db> ExprCollector<'db> {
     }
 
     fn lower_const_arg_opt(&mut self, arg: Option<ast::ConstArg>) -> ConstRef {
-        let const_expr_origins = self.store.const_expr_origins.take();
+        let const_expr_origins = self.store.inference_roots.take();
         let r = ConstRef { expr: self.collect_expr_opt(arg.and_then(|it| it.expr())) };
-        self.store.const_expr_origins = const_expr_origins;
+        self.store.inference_roots = const_expr_origins;
         r
     }
 
     pub fn lower_const_arg(&mut self, arg: ast::ConstArg) -> ConstRef {
-        let const_expr_origins = self.store.const_expr_origins.take();
+        let const_expr_origins = self.store.inference_roots.take();
         let r = ConstRef { expr: self.collect_expr_opt(arg.expr()) };
-        self.store.const_expr_origins = const_expr_origins;
+        self.store.inference_roots = const_expr_origins;
         r
     }
 
@@ -2363,7 +2361,7 @@ impl<'db> ExprCollector<'db> {
                         }
                         Some(ModuleDefId::AdtId(AdtId::StructId(s)))
                         // FIXME: This can cause a cycle if the user is writing invalid code
-                            if self.db.struct_signature(s).shape != FieldsShape::Record =>
+                            if StructSignature::of(self.db, s).shape != FieldsShape::Record =>
                         {
                             (None, Pat::Path(name.into()))
                         }

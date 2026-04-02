@@ -29,6 +29,10 @@ impl SyntaxFactory {
         make::ext::expr_todo().clone_for_update()
     }
 
+    pub fn expr_self(&self) -> ast::Expr {
+        make::ext::expr_self().clone_for_update()
+    }
+
     pub fn lifetime(&self, text: &str) -> ast::Lifetime {
         make::lifetime(text).clone_for_update()
     }
@@ -1470,6 +1474,22 @@ impl SyntaxFactory {
         ast
     }
 
+    pub fn record_expr_field_list(
+        &self,
+        fields: impl IntoIterator<Item = ast::RecordExprField>,
+    ) -> ast::RecordExprFieldList {
+        let (fields, input) = iterator_input(fields);
+        let ast = make::record_expr_field_list(fields).clone_for_update();
+
+        if let Some(mut mapping) = self.mappings() {
+            let mut builder = SyntaxMappingBuilder::new(ast.syntax().clone());
+            builder.map_children(input, ast.fields().map(|f| f.syntax().clone()));
+            builder.finish(&mut mapping);
+        }
+
+        ast
+    }
+
     pub fn record_expr_field(
         &self,
         name: ast::NameRef,
@@ -1480,7 +1500,20 @@ impl SyntaxFactory {
         if let Some(mut mapping) = self.mappings() {
             let mut builder = SyntaxMappingBuilder::new(ast.syntax().clone());
 
-            builder.map_node(name.syntax().clone(), ast.name_ref().unwrap().syntax().clone());
+            if let Some(ast_name_ref) = ast.name_ref() {
+                // NameRef is a direct child
+                builder.map_node(name.syntax().clone(), ast_name_ref.syntax().clone());
+            } else {
+                // NameRef is nested inside PathExpr > Path > PathSegment.
+                // map_node requires the output to be a direct child of the builder's parent, so
+                // we need a separate builder scoped to PathSegment.
+                let ast::Expr::PathExpr(path_expr) = ast.expr().unwrap() else { unreachable!() };
+                let path_segment = path_expr.path().unwrap().segment().unwrap();
+                let inner_name_ref = path_segment.name_ref().unwrap();
+                let mut inner_builder = SyntaxMappingBuilder::new(path_segment.syntax().clone());
+                inner_builder.map_node(name.syntax().clone(), inner_name_ref.syntax().clone());
+                inner_builder.finish(&mut mapping);
+            }
             if let Some(expr) = expr {
                 builder.map_node(expr.syntax().clone(), ast.expr().unwrap().syntax().clone());
             }
@@ -2018,6 +2051,17 @@ impl SyntaxFactory {
 impl SyntaxFactory {
     pub fn ident_path(&self, ident: &str) -> ast::Path {
         self.path_unqualified(self.path_segment(self.name_ref(ident)))
+    }
+
+    pub fn path_from_idents<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a str>,
+    ) -> Option<ast::Path> {
+        make::ext::path_from_idents(parts).map(|path| path.clone_for_update())
+    }
+
+    pub fn token_tree_from_node(&self, node: &SyntaxNode) -> ast::TokenTree {
+        make::ext::token_tree_from_node(node).clone_for_update()
     }
 
     pub fn expr_unit(&self) -> ast::Expr {

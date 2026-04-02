@@ -11,22 +11,22 @@ use std::{
 use cfg::{CfgAtom, CfgDiff};
 use hir::{
     Adt, AssocItem, Crate, DefWithBody, FindPathConfig, GenericDef, HasCrate, HasSource,
-    HirDisplay, ModuleDef, Name, crate_lang_items,
+    HirDisplay, ModuleDef, Name, Variant, VariantId, crate_lang_items,
     db::{DefDatabase, ExpandDatabase, HirDatabase},
     next_solver::{DbInterner, GenericArgs},
 };
 use hir_def::{
-    SyntheticSyntax,
-    expr_store::BodySourceMap,
-    hir::{ExprId, PatId},
+    DefWithBodyId, ExpressionStoreOwnerId, GenericDefId, SyntheticSyntax,
+    expr_store::{Body, BodySourceMap, ExpressionStore},
+    hir::{ExprId, PatId, generics::GenericParams},
 };
 use hir_ty::InferenceResult;
 use ide::{
     Analysis, AnalysisHost, AnnotationConfig, DiagnosticsConfig, Edition, InlayFieldsToResolve,
-    InlayHintsConfig, LineCol, RootDatabase,
+    InlayHintsConfig, LineCol, RaFixtureConfig, RootDatabase,
 };
 use ide_db::{
-    EditionedFileId, LineIndexDatabase, MiniCore, SnippetCap,
+    EditionedFileId, LineIndexDatabase, SnippetCap,
     base_db::{SourceDatabase, salsa::Database},
 };
 use itertools::Itertools;
@@ -230,6 +230,7 @@ impl flags::AnalysisStats {
         let mut num_decls = 0;
         let mut bodies = Vec::new();
         let mut signatures = Vec::new();
+        let mut variants = Vec::new();
         let mut adts = Vec::new();
         let mut file_ids = Vec::new();
 
@@ -247,10 +248,15 @@ impl flags::AnalysisStats {
                     match decl {
                         ModuleDef::Function(f) => bodies.push(DefWithBody::from(f)),
                         ModuleDef::Adt(a) => {
-                            if let Adt::Enum(e) = a {
-                                for v in e.variants(db) {
-                                    bodies.push(DefWithBody::from(v));
+                            match a {
+                                Adt::Enum(e) => {
+                                    for v in e.variants(db) {
+                                        bodies.push(DefWithBody::from(v));
+                                        variants.push(Variant::EnumVariant(v));
+                                    }
                                 }
+                                Adt::Struct(it) => variants.push(Variant::Struct(it)),
+                                Adt::Union(it) => variants.push(Variant::Union(it)),
                             }
                             adts.push(a)
                         }
@@ -293,7 +299,7 @@ impl flags::AnalysisStats {
             }
         }
         eprintln!(
-            ", mods: {}, decls: {num_decls}, bodies: {}, adts: {}, consts: {}, signatures: {}",
+            ", mods: {}, decls: {num_decls}, bodies: {}, adts: {}, consts: {}, signatures: {}, variants: {}",
             visited_modules.len(),
             bodies.len(),
             adts.len(),
@@ -302,6 +308,7 @@ impl flags::AnalysisStats {
                 .filter(|it| matches!(it, DefWithBody::Const(_) | DefWithBody::Static(_)))
                 .count(),
             signatures.len(),
+            variants.len()
         );
 
         eprintln!("  Workspace:");
@@ -337,15 +344,15 @@ impl flags::AnalysisStats {
             }
 
             if !self.skip_lowering {
-                self.run_body_lowering(db, &vfs, &bodies, &signatures, verbosity);
+                self.run_body_lowering(db, &vfs, &bodies, &signatures, &variants, verbosity);
             }
 
             if !self.skip_inference {
-                self.run_inference(db, &vfs, &bodies, &signatures, verbosity);
+                self.run_inference(db, &vfs, &bodies, &signatures, &variants, verbosity);
             }
 
             if !self.skip_mir_stats {
-                self.run_mir_lowering(db, &bodies, &signatures, verbosity);
+                self.run_mir_lowering(db, &bodies, &signatures, &variants, verbosity);
             }
 
             if !self.skip_data_layout {
@@ -353,7 +360,7 @@ impl flags::AnalysisStats {
             }
 
             if !self.skip_const_eval {
-                self.run_const_eval(db, &bodies, &signatures, verbosity);
+                self.run_const_eval(db, &bodies, &signatures, &variants, verbosity);
             }
         });
 
@@ -394,7 +401,7 @@ impl flags::AnalysisStats {
         let mut fail = 0;
         for &a in adts {
             let interner = DbInterner::new_no_crate(db);
-            let generic_params = db.generic_params(a.into());
+            let generic_params = GenericParams::of(db, a.into());
             if generic_params.iter_type_or_consts().next().is_some()
                 || generic_params.iter_lt().next().is_some()
             {
@@ -406,7 +413,7 @@ impl flags::AnalysisStats {
                 hir_def::AdtId::from(a),
                 GenericArgs::empty(interner).store(),
                 hir_ty::ParamEnvAndCrate {
-                    param_env: db.trait_environment(a.into()),
+                    param_env: db.trait_environment(GenericDefId::from(a).into()),
                     krate: a.krate(db).into(),
                 }
                 .store(),
@@ -431,6 +438,7 @@ impl flags::AnalysisStats {
         db: &RootDatabase,
         bodies: &[DefWithBody],
         _signatures: &[GenericDef],
+        _variants: &[Variant],
         verbosity: Verbosity,
     ) {
         let len = bodies
@@ -710,6 +718,7 @@ impl flags::AnalysisStats {
         db: &RootDatabase,
         bodies: &[DefWithBody],
         _signatures: &[GenericDef],
+        _variants: &[Variant],
         verbosity: Verbosity,
     ) {
         let mut bar = match verbosity {
@@ -725,7 +734,7 @@ impl flags::AnalysisStats {
                 format!("mir lowering: {}", full_name(db, || body.name(db), body.module(db)))
             });
             bar.inc(1);
-            if matches!(body, DefWithBody::Variant(_)) {
+            if matches!(body, DefWithBody::EnumVariant(_)) {
                 continue;
             }
             let module = body.module(db);
@@ -768,6 +777,7 @@ impl flags::AnalysisStats {
         vfs: &Vfs,
         bodies: &[DefWithBody],
         signatures: &[GenericDef],
+        variants: &[Variant],
         verbosity: Verbosity,
     ) {
         let mut bar = match verbosity {
@@ -778,21 +788,31 @@ impl flags::AnalysisStats {
 
         if self.parallel {
             let mut inference_sw = self.stop_watch();
-            let bodies = bodies.iter().filter_map(|&body| body.try_into().ok()).collect::<Vec<_>>();
+            let bodies = bodies
+                .iter()
+                .filter_map(|&body| body.try_into().ok())
+                .collect::<Vec<DefWithBodyId>>();
             bodies
                 .par_iter()
                 .map_with(db.clone(), |snap, &body| {
-                    InferenceResult::for_body(snap, body);
+                    InferenceResult::of(snap, body);
                 })
                 .count();
             let signatures = signatures
                 .iter()
                 .filter_map(|&signatures| signatures.try_into().ok())
-                .collect::<Vec<_>>();
+                .collect::<Vec<GenericDefId>>();
             signatures
                 .par_iter()
                 .map_with(db.clone(), |snap, &signatures| {
-                    InferenceResult::for_signature(snap, signatures);
+                    InferenceResult::of(snap, signatures);
+                })
+                .count();
+            let variants = variants.iter().copied().map(Into::into).collect::<Vec<VariantId>>();
+            variants
+                .par_iter()
+                .map_with(db.clone(), |snap, &variants| {
+                    InferenceResult::of(snap, variants);
                 })
                 .count();
             eprintln!("{:<20} {}", "Parallel Inference:", inference_sw.elapsed());
@@ -826,7 +846,9 @@ impl flags::AnalysisStats {
                         DefWithBody::Function(it) => it.source(db).map(|it| it.syntax().cloned()),
                         DefWithBody::Static(it) => it.source(db).map(|it| it.syntax().cloned()),
                         DefWithBody::Const(it) => it.source(db).map(|it| it.syntax().cloned()),
-                        DefWithBody::Variant(it) => it.source(db).map(|it| it.syntax().cloned()),
+                        DefWithBody::EnumVariant(it) => {
+                            it.source(db).map(|it| it.syntax().cloned())
+                        }
                     };
                     if let Some(src) = source {
                         let original_file = src.file_id.original_file(db);
@@ -849,9 +871,9 @@ impl flags::AnalysisStats {
                 bar.println(msg());
             }
             bar.set_message(msg);
-            let body = db.body(body_def_id);
+            let body = Body::of(db, body_def_id);
             let inference_result =
-                catch_unwind(AssertUnwindSafe(|| InferenceResult::for_body(db, body_def_id)));
+                catch_unwind(AssertUnwindSafe(|| InferenceResult::of(db, body_def_id)));
             let inference_result = match inference_result {
                 Ok(inference_result) => inference_result,
                 Err(p) => {
@@ -879,7 +901,7 @@ impl flags::AnalysisStats {
                 }
             };
             // This query is LRU'd, so actually calling it will skew the timing results.
-            let sm = || db.body_with_source_map(body_def_id).1;
+            let sm = || &Body::with_source_map(db, body_def_id).1;
 
             // region:expressions
             let (previous_exprs, previous_unknown, previous_partially_unknown) =
@@ -890,7 +912,7 @@ impl flags::AnalysisStats {
                 let unknown_or_partial = if ty.is_ty_error() {
                     num_exprs_unknown += 1;
                     if verbosity.is_spammy() {
-                        if let Some((path, start, end)) = expr_syntax_range(db, vfs, &sm(), expr_id)
+                        if let Some((path, start, end)) = expr_syntax_range(db, vfs, sm(), expr_id)
                         {
                             bar.println(format!(
                                 "{} {}:{}-{}:{}: Unknown type",
@@ -917,7 +939,7 @@ impl flags::AnalysisStats {
                 };
                 if self.only.is_some() && verbosity.is_spammy() {
                     // in super-verbose mode for just one function, we print every single expression
-                    if let Some((_, start, end)) = expr_syntax_range(db, vfs, &sm(), expr_id) {
+                    if let Some((_, start, end)) = expr_syntax_range(db, vfs, sm(), expr_id) {
                         bar.println(format!(
                             "{}:{}-{}:{}: {}",
                             start.line + 1,
@@ -936,14 +958,14 @@ impl flags::AnalysisStats {
                 if unknown_or_partial && self.output == Some(OutputFormat::Csv) {
                     println!(
                         r#"{},type,"{}""#,
-                        location_csv_expr(db, vfs, &sm(), expr_id),
+                        location_csv_expr(db, vfs, sm(), expr_id),
                         ty.display(db, display_target)
                     );
                 }
                 if let Some(mismatch) = inference_result.type_mismatch_for_expr(expr_id) {
                     num_expr_type_mismatches += 1;
                     if verbosity.is_verbose() {
-                        if let Some((path, start, end)) = expr_syntax_range(db, vfs, &sm(), expr_id)
+                        if let Some((path, start, end)) = expr_syntax_range(db, vfs, sm(), expr_id)
                         {
                             bar.println(format!(
                                 "{} {}:{}-{}:{}: Expected {}, got {}",
@@ -967,7 +989,7 @@ impl flags::AnalysisStats {
                     if self.output == Some(OutputFormat::Csv) {
                         println!(
                             r#"{},mismatch,"{}","{}""#,
-                            location_csv_expr(db, vfs, &sm(), expr_id),
+                            location_csv_expr(db, vfs, sm(), expr_id),
                             mismatch.expected.as_ref().display(db, display_target),
                             mismatch.actual.as_ref().display(db, display_target)
                         );
@@ -994,7 +1016,7 @@ impl flags::AnalysisStats {
                 let unknown_or_partial = if ty.is_ty_error() {
                     num_pats_unknown += 1;
                     if verbosity.is_spammy() {
-                        if let Some((path, start, end)) = pat_syntax_range(db, vfs, &sm(), pat_id) {
+                        if let Some((path, start, end)) = pat_syntax_range(db, vfs, sm(), pat_id) {
                             bar.println(format!(
                                 "{} {}:{}-{}:{}: Unknown type",
                                 path,
@@ -1020,7 +1042,7 @@ impl flags::AnalysisStats {
                 };
                 if self.only.is_some() && verbosity.is_spammy() {
                     // in super-verbose mode for just one function, we print every single pattern
-                    if let Some((_, start, end)) = pat_syntax_range(db, vfs, &sm(), pat_id) {
+                    if let Some((_, start, end)) = pat_syntax_range(db, vfs, sm(), pat_id) {
                         bar.println(format!(
                             "{}:{}-{}:{}: {}",
                             start.line + 1,
@@ -1039,14 +1061,14 @@ impl flags::AnalysisStats {
                 if unknown_or_partial && self.output == Some(OutputFormat::Csv) {
                     println!(
                         r#"{},type,"{}""#,
-                        location_csv_pat(db, vfs, &sm(), pat_id),
+                        location_csv_pat(db, vfs, sm(), pat_id),
                         ty.display(db, display_target)
                     );
                 }
                 if let Some(mismatch) = inference_result.type_mismatch_for_pat(pat_id) {
                     num_pat_type_mismatches += 1;
                     if verbosity.is_verbose() {
-                        if let Some((path, start, end)) = pat_syntax_range(db, vfs, &sm(), pat_id) {
+                        if let Some((path, start, end)) = pat_syntax_range(db, vfs, sm(), pat_id) {
                             bar.println(format!(
                                 "{} {}:{}-{}:{}: Expected {}, got {}",
                                 path,
@@ -1069,7 +1091,7 @@ impl flags::AnalysisStats {
                     if self.output == Some(OutputFormat::Csv) {
                         println!(
                             r#"{},mismatch,"{}","{}""#,
-                            location_csv_pat(db, vfs, &sm(), pat_id),
+                            location_csv_pat(db, vfs, sm(), pat_id),
                             mismatch.expected.as_ref().display(db, display_target),
                             mismatch.actual.as_ref().display(db, display_target)
                         );
@@ -1124,12 +1146,13 @@ impl flags::AnalysisStats {
         vfs: &Vfs,
         bodies: &[DefWithBody],
         signatures: &[GenericDef],
+        variants: &[Variant],
         verbosity: Verbosity,
     ) {
         let mut bar = match verbosity {
             Verbosity::Quiet | Verbosity::Spammy => ProgressReport::hidden(),
             _ if self.output.is_some() => ProgressReport::hidden(),
-            _ => ProgressReport::new(bodies.len() + signatures.len()),
+            _ => ProgressReport::new(bodies.len() + signatures.len() + variants.len()),
         };
 
         let mut sw = self.stop_watch();
@@ -1174,7 +1197,45 @@ impl flags::AnalysisStats {
                 bar.println(msg());
             }
             bar.set_message(msg);
-            db.generic_params_and_store(signature_id);
+            ExpressionStore::of(db, ExpressionStoreOwnerId::Signature(signature_id));
+            bar.inc(1);
+        }
+
+        for &variant in variants {
+            let variant_id = variant.into();
+            let module = variant.module(db);
+            if !self.should_process(db, || Some(variant.name(db)), module) {
+                continue;
+            }
+            let msg = move || {
+                if verbosity.is_verbose() {
+                    let source = match variant {
+                        Variant::EnumVariant(it) => it.source(db).map(|it| it.syntax().cloned()),
+                        Variant::Struct(it) => it.source(db).map(|it| it.syntax().cloned()),
+                        Variant::Union(it) => it.source(db).map(|it| it.syntax().cloned()),
+                    };
+                    if let Some(src) = source {
+                        let original_file = src.file_id.original_file(db);
+                        let path = vfs.file_path(original_file.file_id(db));
+                        let syntax_range = src.text_range();
+                        format!(
+                            "processing: {} ({} {:?})",
+                            full_name(db, || Some(variant.name(db)), module),
+                            path,
+                            syntax_range
+                        )
+                    } else {
+                        format!("processing: {}", full_name(db, || Some(variant.name(db)), module))
+                    }
+                } else {
+                    format!("processing: {}", full_name(db, || Some(variant.name(db)), module))
+                }
+            };
+            if verbosity.is_spammy() {
+                bar.println(msg());
+            }
+            bar.set_message(msg);
+            ExpressionStore::of(db, ExpressionStoreOwnerId::VariantFields(variant_id));
             bar.inc(1);
         }
 
@@ -1190,7 +1251,9 @@ impl flags::AnalysisStats {
                         DefWithBody::Function(it) => it.source(db).map(|it| it.syntax().cloned()),
                         DefWithBody::Static(it) => it.source(db).map(|it| it.syntax().cloned()),
                         DefWithBody::Const(it) => it.source(db).map(|it| it.syntax().cloned()),
-                        DefWithBody::Variant(it) => it.source(db).map(|it| it.syntax().cloned()),
+                        DefWithBody::EnumVariant(it) => {
+                            it.source(db).map(|it| it.syntax().cloned())
+                        }
                     };
                     if let Some(src) = source {
                         let original_file = src.file_id.original_file(db);
@@ -1213,7 +1276,7 @@ impl flags::AnalysisStats {
                 bar.println(msg());
             }
             bar.set_message(msg);
-            db.body(body_def_id);
+            Body::of(db, body_def_id);
             bar.inc(1);
         }
 
@@ -1304,6 +1367,7 @@ impl flags::AnalysisStats {
                 &InlayHintsConfig {
                     render_colons: false,
                     type_hints: true,
+                    type_hints_placement: ide::TypeHintsPlacement::Inline,
                     sized_bound: false,
                     discriminant_hints: ide::DiscriminantHints::Always,
                     parameter_hints: true,
@@ -1334,7 +1398,7 @@ impl flags::AnalysisStats {
                     closing_brace_hints_min_lines: Some(20),
                     fields_to_resolve: InlayFieldsToResolve::empty(),
                     range_exclusive_hints: true,
-                    minicore: MiniCore::default(),
+                    ra_fixture: RaFixtureConfig::default(),
                 },
                 analysis.editioned_file_id_to_vfs(file_id),
                 None,
@@ -1353,7 +1417,7 @@ impl flags::AnalysisStats {
             annotate_enum_variant_references: false,
             location: ide::AnnotationLocation::AboveName,
             filter_adjacent_derive_implementations: false,
-            minicore: MiniCore::default(),
+            ra_fixture: RaFixtureConfig::default(),
         };
         for &file_id in file_ids {
             let msg = format!("annotations: {}", vfs.file_path(file_id.file_id(db)));

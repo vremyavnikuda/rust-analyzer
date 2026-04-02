@@ -11,6 +11,7 @@ use hir_def::{
         InlineAsmKind, LabelId, Literal, Pat, PatId, RecordSpread, Statement, UnaryOp,
     },
     resolver::ValueNs,
+    signatures::{FunctionSignature, VariantFields},
 };
 use hir_def::{FunctionId, hir::ClosureKind};
 use hir_expand::name::Name;
@@ -608,7 +609,7 @@ impl<'db> InferenceContext<'_, 'db> {
                     Some(def) => {
                         let field_types = self.db.field_types(def);
                         let variant_data = def.fields(self.db);
-                        let visibilities = self.db.field_visibilities(def);
+                        let visibilities = VariantFields::field_visibilities(self.db, def);
                         for field in fields.iter() {
                             let field_def = {
                                 match variant_data.field(&field.name) {
@@ -1624,7 +1625,8 @@ impl<'db> InferenceContext<'_, 'db> {
                 },
                 _ => return None,
             };
-            let is_visible = self.db.field_visibilities(field_id.parent)[field_id.local_id]
+            let is_visible = VariantFields::field_visibilities(self.db, field_id.parent)
+                [field_id.local_id]
                 .is_visible_from(self.db, self.resolver.module());
             if !is_visible {
                 if private_field.is_none() {
@@ -2156,7 +2158,7 @@ impl<'db> InferenceContext<'_, 'db> {
             );
             let param_env = self.table.param_env;
             self.table.register_predicates(clauses_as_obligations(
-                generic_predicates.iter_instantiated_copied(self.interner(), parameters.as_slice()),
+                generic_predicates.iter_instantiated(self.interner(), parameters.as_slice()),
                 ObligationCause::new(),
                 param_env,
             ));
@@ -2194,7 +2196,7 @@ impl<'db> InferenceContext<'_, 'db> {
             _ => return Default::default(),
         };
 
-        let data = self.db.function_signature(func);
+        let data = FunctionSignature::of(self.db, func);
         let Some(legacy_const_generics_indices) = data.legacy_const_generics_indices(self.db, func)
         else {
             return Default::default();
