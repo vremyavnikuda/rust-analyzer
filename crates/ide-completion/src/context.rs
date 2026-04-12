@@ -102,6 +102,28 @@ impl PathCompletionCtx<'_> {
             }
         )
     }
+
+    pub(crate) fn required_thin_arrow(&self) -> Option<(&'static str, TextSize)> {
+        let PathKind::Type {
+            location:
+                TypeLocation::TypeAscription(TypeAscriptionTarget::RetType {
+                    item: Some(ref fn_item),
+                    ..
+                }),
+        } = self.kind
+        else {
+            return None;
+        };
+        if fn_item.ret_type().is_some_and(|it| it.thin_arrow_token().is_some()) {
+            return None;
+        }
+        let ret_type = fn_item.ret_type().and_then(|it| it.ty());
+        match (ret_type, fn_item.param_list()) {
+            (Some(ty), _) => Some(("-> ", ty.syntax().text_range().start())),
+            (None, Some(param)) => Some((" ->", param.syntax().text_range().end())),
+            (None, None) => None,
+        }
+    }
 }
 
 /// The kind of path we are completing right now.
@@ -231,7 +253,7 @@ impl TypeLocation {
 pub(crate) enum TypeAscriptionTarget {
     Let(Option<ast::Pat>),
     FnParam(Option<ast::Pat>),
-    RetType(Option<ast::Expr>),
+    RetType { body: Option<ast::Expr>, item: Option<ast::Fn> },
     Const(Option<ast::Expr>),
 }
 
@@ -386,9 +408,11 @@ pub(crate) enum CompletionAnalysis<'db> {
     /// Set if we are currently completing in an unexpanded attribute, this usually implies a builtin attribute like `allow($0)`
     UnexpandedAttrTT {
         colon_prefix: bool,
-        fake_attribute_under_caret: Option<ast::Attr>,
+        fake_attribute_under_caret: Option<ast::TokenTreeMeta>,
         extern_crate: Option<ast::ExternCrate>,
     },
+    /// Set if we are inside the predicate of a #[cfg] or #[cfg_attr].
+    CfgPredicate,
     MacroSegment,
 }
 

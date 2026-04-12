@@ -332,7 +332,7 @@ pub(crate) fn handle_view_crate_graph(
     params: ViewCrateGraphParams,
 ) -> anyhow::Result<String> {
     let _p = tracing::info_span!("handle_view_crate_graph").entered();
-    let dot = snap.analysis.view_crate_graph(params.full)?.map_err(anyhow::Error::msg)?;
+    let dot = snap.analysis.view_crate_graph(params.full)?;
     Ok(dot)
 }
 
@@ -2442,8 +2442,7 @@ fn run_rustfmt(
         }
         RustfmtConfig::CustomCommand { command, args } => {
             let cmd = Utf8PathBuf::from(&command);
-            let target_spec =
-                crates.first().and_then(|&crate_id| snap.target_spec_for_file(file_id, crate_id));
+            let target_spec = TargetSpec::for_file(snap, file_id).ok().flatten();
             let extra_env = snap.config.extra_env(source_root_id);
             let mut cmd = match target_spec {
                 Some(TargetSpec::Cargo(_)) => {

@@ -248,27 +248,23 @@ pub fn add_trait_assoc_items_to_impl(
         })
         .filter_map(|item| match item {
             ast::AssocItem::Fn(fn_) if fn_.body().is_none() => {
-                let fn_ = fn_.clone_subtree();
+                let (mut fn_editor, fn_) = SyntaxEditor::with_ast_node(&fn_);
                 let fill_expr: ast::Expr = match config.expr_fill_default {
                     ExprFillDefaultMode::Todo | ExprFillDefaultMode::Default => make.expr_todo(),
                     ExprFillDefaultMode::Underscore => make.expr_underscore().into(),
                 };
                 let new_body = make.block_expr(None::<ast::Stmt>, Some(fill_expr));
-                let mut fn_editor = SyntaxEditor::new(fn_.syntax().clone());
                 fn_.replace_or_insert_body(&mut fn_editor, new_body);
                 let new_fn_ = fn_editor.finish().new_root().clone();
                 ast::AssocItem::cast(new_fn_)
             }
             ast::AssocItem::TypeAlias(type_alias) => {
-                let type_alias = type_alias.clone_subtree();
+                let (mut type_alias_editor, type_alias) = SyntaxEditor::with_ast_node(&type_alias);
                 if let Some(type_bound_list) = type_alias.type_bound_list() {
-                    let mut type_alias_editor = SyntaxEditor::new(type_alias.syntax().clone());
                     type_bound_list.remove(&mut type_alias_editor);
-                    let type_alias = type_alias_editor.finish().new_root().clone();
-                    ast::AssocItem::cast(type_alias)
-                } else {
-                    Some(ast::AssocItem::TypeAlias(type_alias))
-                }
+                };
+                let type_alias = type_alias_editor.finish().new_root().clone();
+                ast::AssocItem::cast(type_alias)
             }
             item => Some(item),
         })
@@ -334,10 +330,8 @@ fn invert_special_case(make: &SyntaxFactory, expr: &ast::Expr) -> Option<ast::Ex
             Some(make.expr_method_call(receiver, make.name_ref(method), arg_list).into())
         }
         ast::Expr::PrefixExpr(pe) if pe.op_kind()? == ast::UnaryOp::Not => match pe.expr()? {
-            ast::Expr::ParenExpr(parexpr) => {
-                parexpr.expr().map(|e| e.clone_subtree().clone_for_update())
-            }
-            _ => pe.expr().map(|e| e.clone_subtree().clone_for_update()),
+            ast::Expr::ParenExpr(parexpr) => parexpr.expr(),
+            _ => pe.expr(),
         },
         ast::Expr::Literal(lit) => match lit.kind() {
             ast::LiteralKind::Bool(b) => match b {
@@ -604,9 +598,7 @@ fn generate_impl_text_inner(
 
     // Copy any cfg attrs from the original adt
     buf.push_str("\n\n");
-    let cfg_attrs = adt
-        .attrs()
-        .filter(|attr| attr.as_simple_call().map(|(name, _arg)| name == "cfg").unwrap_or(false));
+    let cfg_attrs = adt.attrs().filter(|attr| matches!(attr.meta(), Some(ast::Meta::CfgMeta(_))));
     cfg_attrs.for_each(|attr| buf.push_str(&format!("{attr}\n")));
 
     // `impl{generic_params} {trait_text} for {name}{generic_params.to_generic_args()}`
@@ -746,8 +738,7 @@ fn generate_impl_inner(
 
     let ty = make::ty_path(make::ext::ident_path(&adt.name().unwrap().text()));
 
-    let cfg_attrs =
-        adt.attrs().filter(|attr| attr.as_simple_call().is_some_and(|(name, _arg)| name == "cfg"));
+    let cfg_attrs = adt.attrs().filter(|attr| matches!(attr.meta(), Some(ast::Meta::CfgMeta(_))));
     match trait_ {
         Some(trait_) => make::impl_trait(
             cfg_attrs,
@@ -817,8 +808,7 @@ fn generate_impl_inner_with_factory(
 
     let ty: ast::Type = make.ty_path(make.ident_path(&adt.name().unwrap().text())).into();
 
-    let cfg_attrs =
-        adt.attrs().filter(|attr| attr.as_simple_call().is_some_and(|(name, _arg)| name == "cfg"));
+    let cfg_attrs = adt.attrs().filter(|attr| matches!(attr.meta(), Some(ast::Meta::CfgMeta(_))));
     match trait_ {
         Some(trait_) => make.impl_trait(
             cfg_attrs,

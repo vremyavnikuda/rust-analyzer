@@ -32,8 +32,10 @@ pub(crate) fn convert_let_else_to_match(acc: &mut Assists, ctx: &AssistContext<'
         .or_else(|| ctx.find_token_syntax_at_offset(T![let])?.parent())?;
     let let_stmt = LetStmt::cast(let_stmt)?;
     let else_block = let_stmt.let_else()?.block_expr()?;
-    let else_expr = if else_block.statements().next().is_none() {
-        else_block.tail_expr()?.reset_indent()
+    let else_expr = if else_block.statements().next().is_none()
+        && let Some(tail_expr) = else_block.tail_expr()
+    {
+        tail_expr.reset_indent()
     } else {
         else_block.reset_indent().into()
     };
@@ -190,7 +192,7 @@ fn remove_mut_and_collect_idents(
             let inner = p.pat()?;
             if let ast::Pat::IdentPat(ident) = inner {
                 acc.push(ident);
-                p.clone_for_update().into()
+                p.clone().into()
             } else {
                 make.ref_pat(remove_mut_and_collect_idents(make, &inner, acc)?).into()
             }
@@ -293,6 +295,24 @@ fn main() {
     let x = match f() {
         Ok(x) => x,
         _ => continue,
+    };
+}",
+        );
+    }
+
+    #[test]
+    fn convert_let_else_to_match_with_empty_else_block() {
+        check_assist(
+            convert_let_else_to_match,
+            r"
+fn main() {
+    let Ok(x) = f() else$0 {};
+}",
+            r"
+fn main() {
+    let x = match f() {
+        Ok(x) => x,
+        _ => {}
     };
 }",
         );

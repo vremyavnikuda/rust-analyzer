@@ -230,6 +230,18 @@ impl CargoTargetSpec {
         };
         let test_name = test_name.unwrap_or_default();
 
+        let exact = match kind {
+            RunnableKind::Test { test_id } | RunnableKind::Bench { test_id } => match test_id {
+                TestId::Path(_) => "--exact",
+                TestId::Name(_) => "",
+            },
+            _ => "",
+        };
+        let include_ignored = match kind {
+            RunnableKind::Test { .. } => "--include-ignored",
+            _ => "",
+        };
+
         let target_arg = |kind| match kind {
             TargetKind::Bin => "--bin",
             TargetKind::Test => "--test",
@@ -249,7 +261,9 @@ impl CargoTargetSpec {
                 .replace("${package}", &spec.package)
                 .replace("${target_arg}", target_arg(spec.target_kind))
                 .replace("${target}", target(spec.target_kind, &spec.target))
-                .replace("${test_name}", &test_name),
+                .replace("${test_name}", &test_name)
+                .replace("${exact}", exact)
+                .replace("${include_ignored}", include_ignored),
             _ => arg,
         };
 
@@ -367,23 +381,13 @@ mod tests {
         SmolStr,
         ast::{self, AstNode},
     };
-    use syntax_bridge::{
-        DocCommentDesugarMode,
-        dummy_test_span_utils::{DUMMY, DummyTestSpanMap},
-        syntax_node_to_token_tree,
-    };
 
     fn check(cfg: &str, expected_features: &[&str]) {
         let cfg_expr = {
             let source_file = ast::SourceFile::parse(cfg, Edition::CURRENT).ok().unwrap();
-            let tt = source_file.syntax().descendants().find_map(ast::TokenTree::cast).unwrap();
-            let tt = syntax_node_to_token_tree(
-                tt.syntax(),
-                &DummyTestSpanMap,
-                DUMMY,
-                DocCommentDesugarMode::Mbe,
-            );
-            CfgExpr::parse(&tt)
+            let cfg_predicate =
+                source_file.syntax().descendants().find_map(ast::CfgPredicate::cast).unwrap();
+            CfgExpr::parse_from_ast(cfg_predicate)
         };
 
         let mut features = vec![];

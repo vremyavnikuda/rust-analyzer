@@ -831,6 +831,9 @@ config_data! {
         ///
         /// Set this to `"all"` to pass `--all-features` to cargo.
         cargo_features: CargoFeaturesDef      = CargoFeaturesDef::Selected(vec![]),
+        /// Extra arguments passed only to `cargo metadata`, not to other cargo invocations.
+        /// Useful for flags like `--config` that `cargo metadata` supports.
+        cargo_metadataExtraArgs: Vec<String> = vec![],
         /// Whether to pass `--no-default-features` to cargo.
         cargo_noDefaultFeatures: bool    = false,
         /// Whether to skip fetching dependencies. If set to "true", the analysis is performed
@@ -957,18 +960,30 @@ config_data! {
         /// Override the command used for bench runnables.
         /// The first element of the array should be the program to execute (for example, `cargo`).
         ///
-        /// Use the placeholders `${package}`, `${target_arg}`, `${target}`, `${executable_args}` to dynamically
-        /// replace the package name, target option (such as `--bin` or `--example`), the target name and
-        /// the arguments passed to test binary args (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
+        /// Use the placeholders:
+        /// - `${package}`: package name.
+        /// - `${target_arg}`: target option such as `--bin`, `--test`, `--lib`, etc.
+        /// - `${target}`: target name (empty for `--lib`).
+        /// - `${test_name}`: the test path filter, e.g. `module::bench_func`.
+        /// - `${exact}`: `--exact` for single benchmarks, empty for modules.
+        /// - `${include_ignored}`: always empty for benchmarks.
+        /// - `${executable_args}`: all of the above binary args bundled together
+        ///   (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
         runnables_bench_overrideCommand: Option<Vec<String>> = None,
         /// Command to be executed instead of 'cargo' for runnables.
         runnables_command: Option<String> = None,
-        /// Override the command used for bench runnables.
+        /// Override the command used for doc-test runnables.
         /// The first element of the array should be the program to execute (for example, `cargo`).
         ///
-        /// Use the placeholders `${package}`, `${target_arg}`, `${target}`, `${executable_args}` to dynamically
-        /// replace the package name, target option (such as `--bin` or `--example`), the target name and
-        /// the arguments passed to test binary args (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
+        /// Use the placeholders:
+        /// - `${package}`: package name.
+        /// - `${target_arg}`: target option such as `--bin`, `--test`, `--lib`, etc.
+        /// - `${target}`: target name (empty for `--lib`).
+        /// - `${test_name}`: the test path filter, e.g. `module::func`.
+        /// - `${exact}`: always empty for doc-tests.
+        /// - `${include_ignored}`: always empty for doc-tests.
+        /// - `${executable_args}`: all of the above binary args bundled together
+        ///   (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
         runnables_doctest_overrideCommand: Option<Vec<String>> = None,
         /// Additional arguments to be passed to cargo for runnables such as
         /// tests or binaries. For example, it may be `--release`.
@@ -986,9 +1001,15 @@ config_data! {
         /// Override the command used for test runnables.
         /// The first element of the array should be the program to execute (for example, `cargo`).
         ///
-        /// Use the placeholders `${package}`, `${target_arg}`, `${target}`, `${executable_args}` to dynamically
-        /// replace the package name, target option (such as `--bin` or `--example`), the target name and
-        /// the arguments passed to test binary args (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
+        /// Available placeholders:
+        /// - `${package}`: package name.
+        /// - `${target_arg}`: target option such as `--bin`, `--test`, `--lib`, etc.
+        /// - `${target}`: target name (empty for `--lib`).
+        /// - `${test_name}`: the test path filter, e.g. `module::test_func`.
+        /// - `${exact}`: `--exact` for single tests, empty for modules.
+        /// - `${include_ignored}`: `--include-ignored` for single tests, empty otherwise.
+        /// - `${executable_args}`: all of the above binary args bundled together
+        ///   (includes `rust-analyzer.runnables.extraTestBinaryArgs`).
         runnables_test_overrideCommand: Option<Vec<String>> = None,
 
         /// Path to the Cargo.toml of the rust compiler workspace, for usage in rustc_private
@@ -2444,6 +2465,7 @@ impl Config {
             target_dir_config: self.target_dir_from_config(source_root),
             set_test: *self.cfg_setTest(source_root),
             no_deps: *self.cargo_noDeps(source_root),
+            metadata_extra_args: self.cargo_metadataExtraArgs(source_root).clone(),
         }
     }
 
