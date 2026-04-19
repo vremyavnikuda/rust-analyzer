@@ -1440,9 +1440,7 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
         });
 
         if placeholder_ids.len() == type_variables.len() {
-            for (placeholder_id, type_variable) in
-                placeholder_ids.into_iter().zip(type_variables.into_iter())
-            {
+            for (placeholder_id, type_variable) in placeholder_ids.into_iter().zip(type_variables) {
                 self.write_type_placeholder_ty(placeholder_id, type_variable);
             }
         }
@@ -1674,10 +1672,9 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
             Some(res_assoc_ty) => {
                 let alias = Ty::new_alias(
                     self.interner(),
-                    AliasTyKind::Projection,
                     AliasTy::new(
                         self.interner(),
-                        res_assoc_ty.into(),
+                        AliasTyKind::Projection { def_id: res_assoc_ty.into() },
                         iter::once(inner_ty.into()).chain(params.iter().copied()),
                     ),
                 );
@@ -1728,8 +1725,11 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
                 let args = self.infcx().fill_rest_fresh_args(assoc_type.into(), trait_ref.args);
                 let alias = Ty::new_alias(
                     self.interner(),
-                    AliasTyKind::Projection,
-                    AliasTy::new_from_args(self.interner(), assoc_type.into(), args),
+                    AliasTy::new_from_args(
+                        self.interner(),
+                        AliasTyKind::Projection { def_id: assoc_type.into() },
+                        args,
+                    ),
                 );
                 ty = self.table.try_structurally_resolve_type(alias);
                 segments = segments.skip(1);

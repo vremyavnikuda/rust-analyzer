@@ -121,7 +121,7 @@ fn make_fetch_closure_field<'db>(
     db: &'db dyn HirDatabase,
 ) -> impl FnOnce(InternedClosureId, GenericArgs<'db>, usize) -> Ty<'db> + use<'db> {
     |c: InternedClosureId, subst: GenericArgs<'db>, f: usize| {
-        let InternedClosure(owner, _) = db.lookup_intern_closure(c);
+        let InternedClosure(owner, _) = c.loc(db);
         let interner = DbInterner::new_no_crate(db);
         let infer = InferenceResult::of(db, owner);
         let (captures, _) = infer.closure_info(c);
@@ -160,7 +160,7 @@ fn moved_out_of_ref<'db>(
                 result.push(MovedOutOfRef { span: op.span.unwrap_or(span), ty: ty.store() });
             }
         }
-        OperandKind::Constant { .. } | OperandKind::Static(_) => (),
+        OperandKind::Constant { .. } | OperandKind::Static(_) | OperandKind::Allocation { .. } => {}
     };
     for (_, block) in body.basic_blocks.iter() {
         db.unwind_if_revision_cancelled();
@@ -254,7 +254,7 @@ fn partially_moved<'db>(
                 result.push(PartiallyMoved { span, ty: ty.store(), local: p.local });
             }
         }
-        OperandKind::Constant { .. } | OperandKind::Static(_) => (),
+        OperandKind::Constant { .. } | OperandKind::Static(_) | OperandKind::Allocation { .. } => {}
     };
     for (_, block) in body.basic_blocks.iter() {
         db.unwind_if_revision_cancelled();

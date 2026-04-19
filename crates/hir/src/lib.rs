@@ -85,7 +85,7 @@ use hir_ty::{
     GenericPredicates, InferenceResult, ParamEnvAndCrate, TyDefId, TyLoweringDiagnostic,
     ValueTyDefId, all_super_traits, autoderef, check_orphan_rules,
     consteval::try_const_usize,
-    db::{InternedClosureId, InternedCoroutineId},
+    db::{InternedClosureId, InternedCoroutineClosureId},
     diagnostics::BodyValidationDiagnostic,
     direct_super_traits, known_const_to_ast,
     layout::{Layout as TyLayout, RustcEnumVariantIdx, RustcFieldIdx, TagEncoding},
@@ -342,6 +342,10 @@ impl Crate {
             })
             .map(Crate::from)
     }
+
+    pub fn is_unstable_feature_enabled(self, db: &dyn HirDatabase, feature: &Symbol) -> bool {
+        crate_def_map(db, self.id).is_unstable_feature_enabled(feature)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -548,6 +552,23 @@ impl HasCrate for ModuleDef {
         match self.module(db) {
             Some(module) => module.krate(db),
             None => Crate::core(db).unwrap_or_else(|| all_crates(db)[0].into()),
+        }
+    }
+}
+
+impl HasAttrs for ModuleDef {
+    fn attr_id(self, db: &dyn HirDatabase) -> attrs::AttrsOwner {
+        match self {
+            ModuleDef::Module(it) => it.attr_id(db),
+            ModuleDef::Function(it) => it.attr_id(db),
+            ModuleDef::Adt(it) => it.attr_id(db),
+            ModuleDef::EnumVariant(it) => it.attr_id(db),
+            ModuleDef::Const(it) => it.attr_id(db),
+            ModuleDef::Static(it) => it.attr_id(db),
+            ModuleDef::Trait(it) => it.attr_id(db),
+            ModuleDef::TypeAlias(it) => it.attr_id(db),
+            ModuleDef::Macro(it) => it.attr_id(db),
+            ModuleDef::BuiltinType(_) => attrs::AttrsOwner::Dummy,
         }
     }
 }
@@ -2950,7 +2971,7 @@ impl<'db> Param<'db> {
                 }
             }
             Callee::Closure(closure, _) => {
-                let c = db.lookup_intern_closure(closure);
+                let c = closure.loc(db);
                 let body_owner = c.0;
                 let store = ExpressionStore::of(db, c.0);
 
@@ -3124,7 +3145,7 @@ impl Const {
         let interner = DbInterner::new_no_crate(db);
         let ty = db.value_ty(self.id.into()).unwrap().instantiate_identity();
         db.const_eval(self.id, GenericArgs::empty(interner), None).map(|it| EvaluatedConst {
-            const_: it,
+            allocation: it,
             def: self.id.into(),
             ty,
         })
@@ -3139,22 +3160,19 @@ impl HasVisibility for Const {
 
 pub struct EvaluatedConst<'db> {
     def: DefWithBodyId,
-    const_: hir_ty::next_solver::Const<'db>,
+    allocation: hir_ty::next_solver::Allocation<'db>,
     ty: Ty<'db>,
 }
 
 impl<'db> EvaluatedConst<'db> {
     pub fn render(&self, db: &dyn HirDatabase, display_target: DisplayTarget) -> String {
-        format!("{}", self.const_.display(db, display_target))
+        format!("{}", self.allocation.display(db, display_target))
     }
 
     pub fn render_debug(&self, db: &'db dyn HirDatabase) -> Result<String, MirEvalError> {
-        let kind = self.const_.kind();
-        if let ConstKind::Value(c) = kind
-            && let ty = c.ty.kind()
-            && let TyKind::Int(_) | TyKind::Uint(_) = ty
-        {
-            let b = &c.value.inner().memory;
+        let ty = self.allocation.ty.kind();
+        if let TyKind::Int(_) | TyKind::Uint(_) = ty {
+            let b = &self.allocation.memory;
             let value = u128::from_le_bytes(mir::pad16(b, false));
             let value_signed = i128::from_le_bytes(mir::pad16(b, matches!(ty, TyKind::Int(_))));
             let mut result =
@@ -3166,7 +3184,7 @@ impl<'db> EvaluatedConst<'db> {
                 return Ok(result);
             }
         }
-        mir::render_const_using_debug_impl(db, self.def, self.const_, self.ty)
+        mir::render_const_using_debug_impl(db, self.def, self.allocation, self.ty)
     }
 }
 
@@ -3207,7 +3225,7 @@ impl Static {
     pub fn eval(self, db: &dyn HirDatabase) -> Result<EvaluatedConst<'_>, ConstEvalError> {
         let ty = db.value_ty(self.id.into()).unwrap().instantiate_identity();
         db.const_eval_static(self.id).map(|it| EvaluatedConst {
-            const_: it,
+            allocation: it,
             def: self.id.into(),
             ty,
         })
@@ -5092,7 +5110,7 @@ impl<'db> TraitRef<'db> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AnyClosureId {
     ClosureId(InternedClosureId),
-    CoroutineClosureId(InternedCoroutineId),
+    CoroutineClosureId(InternedCoroutineClosureId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -5131,7 +5149,7 @@ impl<'db> Closure<'db> {
             // FIXME: Infer coroutine closures' captures.
             return Vec::new();
         };
-        let owner = db.lookup_intern_closure(id).0;
+        let owner = id.loc(db).0;
         let infer = InferenceResult::of(db, owner);
         let info = infer.closure_info(id);
         info.0
@@ -5151,7 +5169,7 @@ impl<'db> Closure<'db> {
             // FIXME: Infer coroutine closures' captures.
             return Vec::new();
         };
-        let owner = db.lookup_intern_closure(id).0;
+        let owner = id.loc(db).0;
         let Some(body_owner) = owner.as_def_with_body() else {
             return Vec::new();
         };
@@ -5164,7 +5182,7 @@ impl<'db> Closure<'db> {
     pub fn fn_trait(&self, db: &dyn HirDatabase) -> FnTrait {
         match self.id {
             AnyClosureId::ClosureId(id) => {
-                let owner = db.lookup_intern_closure(id).0;
+                let owner = id.loc(db).0;
                 let Some(body_owner) = owner.as_def_with_body() else {
                     return FnTrait::FnOnce;
                 };
@@ -5736,8 +5754,11 @@ impl<'db> Type<'db> {
         // FIXME: We don't handle GATs yet.
         let projection = Ty::new_alias(
             interner,
-            AliasTyKind::Projection,
-            AliasTy::new_from_args(interner, alias.id.into(), args),
+            AliasTy::new_from_args(
+                interner,
+                AliasTyKind::Projection { def_id: alias.id.into() },
+                args,
+            ),
         );
 
         let infcx = interner.infer_ctxt().build(TypingMode::PostAnalysis);
@@ -5816,6 +5837,18 @@ impl<'db> Type<'db> {
 
     pub fn is_raw_ptr(&self) -> bool {
         matches!(self.ty.kind(), TyKind::RawPtr(..))
+    }
+
+    pub fn is_mutable_raw_ptr(&self) -> bool {
+        // Used outside of rust-analyzer (e.g. by `ra_ap_hir` consumers).
+        matches!(self.ty.kind(), TyKind::RawPtr(.., hir_ty::next_solver::Mutability::Mut))
+    }
+
+    pub fn as_raw_ptr(&self) -> Option<(Type<'db>, Mutability)> {
+        // Used outside of rust-analyzer (e.g. by `ra_ap_hir` consumers).
+        let TyKind::RawPtr(ty, m) = self.ty.kind() else { return None };
+        let m = Mutability::from_mutable(matches!(m, hir_ty::next_solver::Mutability::Mut));
+        Some((self.derived(ty), m))
     }
 
     pub fn remove_raw_ptr(&self) -> Option<Type<'db>> {
@@ -6341,8 +6374,12 @@ impl<'db> Type<'db> {
     }
 
     pub fn as_associated_type_parent_trait(&self, db: &'db dyn HirDatabase) -> Option<Trait> {
-        let TyKind::Alias(AliasTyKind::Projection, alias) = self.ty.kind() else { return None };
-        match alias.def_id.expect_type_alias().loc(db).container {
+        let TyKind::Alias(AliasTy { kind: AliasTyKind::Projection { def_id }, .. }) =
+            self.ty.kind()
+        else {
+            return None;
+        };
+        match def_id.expect_type_alias().loc(db).container {
             ItemContainerId::TraitId(id) => Some(Trait { id }),
             _ => None,
         }
@@ -6520,7 +6557,7 @@ pub struct Callable<'db> {
 enum Callee<'db> {
     Def(CallableDefId),
     Closure(InternedClosureId, GenericArgs<'db>),
-    CoroutineClosure(InternedCoroutineId, GenericArgs<'db>),
+    CoroutineClosure(InternedCoroutineClosureId, GenericArgs<'db>),
     FnPtr,
     FnImpl(traits::FnTrait),
     BuiltinDeriveImplMethod { method: BuiltinDeriveImplMethod, impl_: BuiltinDeriveImplId },
@@ -6658,8 +6695,8 @@ impl Layout {
                 let offset = stride.bytes() * tail;
                 self.0.size.bytes().checked_sub(offset)?.checked_sub(tail_field_size)
             }),
-            layout::FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
-                let tail = memory_index.last_index()?;
+            layout::FieldsShape::Arbitrary { ref offsets, ref in_memory_order } => {
+                let tail = in_memory_order[in_memory_order.len().checked_sub(1)? as u32];
                 let tail_field_size = field_size(tail.0.into_raw().into_u32() as usize)?;
                 let offset = offsets.get(tail)?.bytes();
                 self.0.size.bytes().checked_sub(offset)?.checked_sub(tail_field_size)
@@ -6679,10 +6716,11 @@ impl Layout {
                 let size = field_size(0)?;
                 stride.bytes().checked_sub(size)
             }
-            layout::FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
-                let mut reverse_index = vec![None; memory_index.len()];
-                for (src, (mem, offset)) in memory_index.iter().zip(offsets.iter()).enumerate() {
-                    reverse_index[*mem as usize] = Some((src, offset.bytes()));
+            layout::FieldsShape::Arbitrary { ref offsets, ref in_memory_order } => {
+                let mut reverse_index = vec![None; in_memory_order.len()];
+                for (mem, src) in in_memory_order.iter().enumerate() {
+                    reverse_index[mem] =
+                        Some((src.0.into_raw().into_u32() as usize, offsets[*src].bytes()));
                 }
                 if reverse_index.iter().any(|it| it.is_none()) {
                     stdx::never!();

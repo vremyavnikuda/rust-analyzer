@@ -8,8 +8,9 @@ use hir_def::{
     HasModule, ItemContainerId, LocalFieldId, Lookup, TraitId, TupleId,
     expr_store::{Body, ExpressionStore, HygieneId, path::Path},
     hir::{
-        ArithOp, Array, BinaryOp, BindingAnnotation, BindingId, ExprId, LabelId, Literal, MatchArm,
-        Pat, PatId, RecordFieldPat, RecordLitField, RecordSpread, generics::GenericParams,
+        ArithOp, Array, BinaryOp, BindingAnnotation, BindingId, ClosureKind, ExprId, LabelId,
+        Literal, MatchArm, Pat, PatId, RecordFieldPat, RecordLitField, RecordSpread,
+        generics::GenericParams,
     },
     item_tree::FieldsShape,
     lang_item::LangItems,
@@ -956,7 +957,6 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             }
             Expr::Await { .. } => not_supported!("await"),
             Expr::Yeet { .. } => not_supported!("yeet"),
-            Expr::Async { .. } => not_supported!("async block"),
             &Expr::Const(_) => {
                 // let subst = self.placeholder_subst();
                 // self.lower_const(
@@ -1245,7 +1245,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 );
                 Ok(Some(current))
             }
-            Expr::Closure { .. } => {
+            Expr::Closure { closure_kind: ClosureKind::Closure, .. } => {
                 let ty = self.expr_ty_without_adjust(expr_id);
                 let TyKind::Closure(id, _) = ty.kind() else {
                     not_supported!("closure with non closure type");
@@ -1304,6 +1304,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 );
                 Ok(Some(current))
             }
+            Expr::Closure { closure_kind, .. } => not_supported!("{closure_kind:?} closure"),
             Expr::Tuple { exprs } => {
                 let Some(values) = exprs
                     .iter()
@@ -1492,8 +1493,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             hir_def::hir::Literal::Uint(it, _) => Box::from(&it.to_le_bytes()[0..size()?]),
             hir_def::hir::Literal::Float(f, _) => match size()? {
                 16 => Box::new(f.to_f128().to_bits().to_le_bytes()),
-                8 => Box::new(f.to_f64().to_le_bytes()),
-                4 => Box::new(f.to_f32().to_le_bytes()),
+                8 => Box::new(f.to_f64().to_bits().to_le_bytes()),
+                4 => Box::new(f.to_f32().to_bits().to_le_bytes()),
                 2 => Box::new(u16::try_from(f.to_f16().to_bits()).unwrap().to_le_bytes()),
                 _ => {
                     return Err(MirLowerError::TypeError(
@@ -1527,31 +1528,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         subst: GenericArgs<'db>,
         const_id: GeneralConstId,
     ) -> Result<'db, Operand> {
-        let konst = if !subst.is_empty() {
-            // We can't evaluate constant with substitution now, as generics are not monomorphized in lowering.
-            Const::new_unevaluated(
-                self.interner(),
-                UnevaluatedConst { def: const_id.into(), args: subst },
-            )
-        } else {
-            match const_id {
-                id @ GeneralConstId::ConstId(const_id) => {
-                    self.db.const_eval(const_id, subst, None).map_err(|e| {
-                        let name = id.name(self.db);
-                        MirLowerError::ConstEvalError(name.into(), Box::new(e))
-                    })?
-                }
-                GeneralConstId::StaticId(static_id) => {
-                    self.db.const_eval_static(static_id).map_err(|e| {
-                        let name = const_id.name(self.db);
-                        MirLowerError::ConstEvalError(name.into(), Box::new(e))
-                    })?
-                }
-                GeneralConstId::AnonConstId(_) => {
-                    return Err(MirLowerError::IncompleteExpr);
-                }
-            }
-        };
+        if matches!(const_id, GeneralConstId::AnonConstId(_)) {
+            // FIXME:
+            not_supported!("anon consts are not supported yet in const eval");
+        }
+        let konst = Const::new_unevaluated(
+            self.interner(),
+            UnevaluatedConst { def: const_id.into(), args: subst },
+        );
         let ty = self
             .db
             .value_ty(match const_id {
@@ -2110,7 +2094,7 @@ pub fn mir_body_for_closure_query<'db>(
     db: &'db dyn HirDatabase,
     closure: InternedClosureId,
 ) -> Result<'db, Arc<MirBody>> {
-    let InternedClosure(owner, expr) = db.lookup_intern_closure(closure);
+    let InternedClosure(owner, expr) = closure.loc(db);
     let body_owner =
         owner.as_def_with_body().expect("MIR lowering should only happen for body-owned closures");
     let body = Body::of(db, body_owner);
