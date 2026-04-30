@@ -35,6 +35,7 @@ mod handlers {
     pub(crate) mod elided_lifetimes_in_path;
     pub(crate) mod expected_function;
     pub(crate) mod generic_args_prohibited;
+    pub(crate) mod generic_default_refers_to_self;
     pub(crate) mod inactive_code;
     pub(crate) mod incoherent_impl;
     pub(crate) mod incorrect_case;
@@ -42,6 +43,7 @@ mod handlers {
     pub(crate) mod incorrect_generics_order;
     pub(crate) mod invalid_cast;
     pub(crate) mod invalid_derive_target;
+    pub(crate) mod invalid_lhs_of_assignment;
     pub(crate) mod macro_error;
     pub(crate) mod malformed_derive;
     pub(crate) mod mismatched_arg_count;
@@ -53,7 +55,9 @@ mod handlers {
     pub(crate) mod mutability_errors;
     pub(crate) mod no_such_field;
     pub(crate) mod non_exhaustive_let;
+    pub(crate) mod non_exhaustive_record_expr;
     pub(crate) mod parenthesized_generic_args_without_fn_trait;
+    pub(crate) mod pattern_arg_in_extern_fn;
     pub(crate) mod private_assoc_item;
     pub(crate) mod private_field;
     pub(crate) mod remove_trailing_return;
@@ -64,6 +68,7 @@ mod handlers {
     pub(crate) mod trait_impl_orphan;
     pub(crate) mod trait_impl_redundant_assoc_item;
     pub(crate) mod type_mismatch;
+    pub(crate) mod type_must_be_known;
     pub(crate) mod typed_hole;
     pub(crate) mod undeclared_label;
     pub(crate) mod unimplemented_builtin_macro;
@@ -428,6 +433,9 @@ pub fn semantic_diagnostics(
                 None => continue,
             },
             AnyDiagnostic::NonExhaustiveLet(d) => handlers::non_exhaustive_let::non_exhaustive_let(&ctx, &d),
+            AnyDiagnostic::NonExhaustiveRecordExpr(d) => {
+                handlers::non_exhaustive_record_expr::non_exhaustive_record_expr(&ctx, &d)
+            }
             AnyDiagnostic::NoSuchField(d) => handlers::no_such_field::no_such_field(&ctx, &d),
             AnyDiagnostic::PrivateAssocItem(d) => handlers::private_assoc_item::private_assoc_item(&ctx, &d),
             AnyDiagnostic::PrivateField(d) => handlers::private_field::private_field(&ctx, &d),
@@ -477,6 +485,10 @@ pub fn semantic_diagnostics(
             AnyDiagnostic::IncorrectGenericsOrder(d) => handlers::incorrect_generics_order::incorrect_generics_order(&ctx, &d),
             AnyDiagnostic::MissingLifetime(d) => handlers::missing_lifetime::missing_lifetime(&ctx, &d),
             AnyDiagnostic::ElidedLifetimesInPath(d) => handlers::elided_lifetimes_in_path::elided_lifetimes_in_path(&ctx, &d),
+            AnyDiagnostic::GenericDefaultRefersToSelf(d) => handlers::generic_default_refers_to_self::generic_default_refers_to_self(&ctx, &d),
+            AnyDiagnostic::InvalidLhsOfAssignment(d) => handlers::invalid_lhs_of_assignment::invalid_lhs_of_assignment(&ctx, &d),
+            AnyDiagnostic::TypeMustBeKnown(d) => handlers::type_must_be_known::type_must_be_known(&ctx, &d),
+            AnyDiagnostic::PatternArgInExternFn(d) => handlers::pattern_arg_in_extern_fn::pattern_arg_in_extern_fn(&ctx, &d),
         };
         res.push(d)
     }

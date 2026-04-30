@@ -357,6 +357,7 @@ fn f() {
     fn arg_count_lambda() {
         check_diagnostics(
             r#"
+//- minicore: fn
 fn main() {
     let f = |()| ();
     f();
@@ -452,6 +453,8 @@ fn g() {
     b::<1, 3>(0, 2);
 
     b(0, 1, 2);
+ // ^ error: type annotations needed
+ // | full type: `fn b<_, _>(u8, u8)`
            //^ error: expected 4 arguments, found 3
 }
             "#,

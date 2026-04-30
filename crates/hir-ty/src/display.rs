@@ -14,7 +14,10 @@ use hir_def::{
     Lookup, ModuleDefId, ModuleId, TraitId,
     expr_store::{ExpressionStore, path::Path},
     find_path::{self, PrefixKind},
-    hir::generics::{GenericParams, TypeOrConstParamData, TypeParamProvenance, WherePredicate},
+    hir::{
+        ClosureKind as HirClosureKind, CoroutineKind,
+        generics::{GenericParams, TypeOrConstParamData, TypeParamProvenance, WherePredicate},
+    },
     item_scope::ItemInNs,
     item_tree::FieldsShape,
     lang_item::LangItems,
@@ -40,15 +43,15 @@ use rustc_ast_ir::FloatTy;
 use rustc_hash::FxHashSet;
 use rustc_type_ir::{
     AliasTyKind, BoundVarIndexKind, CoroutineArgsParts, RegionKind, Upcast,
-    inherent::{AdtDef, GenericArgs as _, IntoKind, Term as _, Ty as _, Tys as _},
+    inherent::{GenericArgs as _, IntoKind, Term as _, Ty as _, Tys as _},
 };
 use smallvec::SmallVec;
 use span::Edition;
 use stdx::never;
 
 use crate::{
-    CallableDefId, FnAbi, ImplTraitId, InferenceResult, MemoryMap, ParamEnvAndCrate, consteval,
-    db::{HirDatabase, InternedClosure},
+    CallableDefId, FnAbi, ImplTraitId, MemoryMap, ParamEnvAndCrate, consteval,
+    db::HirDatabase,
     generics::generics,
     layout::Layout,
     lower::GenericPredicates,
@@ -64,6 +67,36 @@ use crate::{
     primitive,
     utils::{detect_variant_from_bytes, fn_traits},
 };
+
+fn async_gen_item_ty_from_yield_ty<'db>(
+    lang_items: &LangItems,
+    yield_ty: Ty<'db>,
+) -> Option<Ty<'db>> {
+    let poll_id = lang_items.Poll.map(hir_def::AdtId::EnumId)?;
+    let option_id = lang_items.Option.map(hir_def::AdtId::EnumId)?;
+
+    let TyKind::Adt(poll_def, poll_args) = yield_ty.kind() else {
+        return None;
+    };
+    if poll_def.def_id() != poll_id {
+        return None;
+    }
+    let [poll_inner] = poll_args.as_slice() else {
+        return None;
+    };
+    let poll_inner = poll_inner.ty()?;
+
+    let TyKind::Adt(option_def, option_args) = poll_inner.kind() else {
+        return None;
+    };
+    if option_def.def_id() != option_id {
+        return None;
+    }
+    let [item] = option_args.as_slice() else {
+        return None;
+    };
+    item.ty()
+}
 
 pub type Result<T = (), E = HirDisplayError> = std::result::Result<T, E>;
 
@@ -857,7 +890,7 @@ fn render_const_scalar_inner<'db>(
                 f.write_str("&")?;
                 render_const_scalar(f, bytes, memory_map, t)
             }
-            TyKind::Adt(adt, _) if b.len() == 2 * size_of::<usize>() => match adt.def_id().0 {
+            TyKind::Adt(adt, _) if b.len() == 2 * size_of::<usize>() => match adt.def_id() {
                 hir_def::AdtId::StructId(s) => {
                     let data = StructSignature::of(f.db, s);
                     write!(f, "&{}", data.name.display(f.db, f.edition()))?;
@@ -911,7 +944,7 @@ fn render_const_scalar_inner<'db>(
             f.write_str(")")
         }
         TyKind::Adt(def, args) => {
-            let def = def.def_id().0;
+            let def = def.def_id();
             let Ok(layout) = f.db.layout_of_adt(def, args.store(), param_env.store()) else {
                 return f.write_str("<layout-error>");
             };
@@ -1387,7 +1420,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 }
             }
             TyKind::Adt(def, parameters) => {
-                let def_id = def.def_id().0;
+                let def_id = def.def_id();
                 f.start_location_link(def_id.into());
                 match f.display_kind {
                     DisplayKind::Diagnostics | DisplayKind::Test => {
@@ -1425,7 +1458,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 }
                 f.end_location_link();
 
-                hir_fmt_generics(f, parameters.as_slice(), Some(def.def_id().0.into()), None)?;
+                hir_fmt_generics(f, parameters.as_slice(), Some(def.def_id().into()), None)?;
             }
             TyKind::Alias(alias_ty @ AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => {
                 write_projection(f, &alias_ty, trait_bounds_need_parens)?
@@ -1495,9 +1528,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 }
                 let sig = interner.signature_unclosure(substs.as_closure().sig(), Safety::Safe);
                 let sig = sig.skip_binder();
-                let InternedClosure(owner, _) = id.loc(db);
-                let infer = InferenceResult::of(db, owner);
-                let (_, kind) = infer.closure_info(id);
+                let kind = substs.as_closure().kind();
                 match f.closure_style {
                     ClosureStyle::ImplFn => write!(f, "impl {kind:?}(")?,
                     ClosureStyle::RANotation => write!(f, "|")?,
@@ -1521,6 +1552,15 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
             }
             TyKind::CoroutineClosure(id, args) => {
                 let id = id.0;
+                let closure_kind = match id.loc(db).kind {
+                    HirClosureKind::CoroutineClosure(kind) => kind,
+                    kind => panic!("invalid kind for coroutine closure: {kind:?}"),
+                };
+                let closure_label = match closure_kind {
+                    CoroutineKind::Async => "async closure",
+                    CoroutineKind::Gen => "gen closure",
+                    CoroutineKind::AsyncGen => "async gen closure",
+                };
                 if f.display_kind.is_source_code() {
                     if !f.display_kind.allows_opaque() {
                         return Err(HirDisplayError::DisplaySourceCodeError(
@@ -1535,25 +1575,28 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                     ClosureStyle::ClosureWithId => {
                         return write!(
                             f,
-                            "{{async closure#{:?}}}",
+                            "{{{closure_label}#{:?}}}",
                             salsa::plumbing::AsId::as_id(&id).index()
                         );
                     }
                     ClosureStyle::ClosureWithSubst => {
                         write!(
                             f,
-                            "{{async closure#{:?}}}",
+                            "{{{closure_label}#{:?}}}",
                             salsa::plumbing::AsId::as_id(&id).index()
                         )?;
                         return hir_fmt_generics(f, args.as_slice(), None, None);
                     }
                     _ => (),
                 }
-                let kind = args.as_coroutine_closure().kind();
-                let kind = match kind {
-                    rustc_type_ir::ClosureKind::Fn => "AsyncFn",
-                    rustc_type_ir::ClosureKind::FnMut => "AsyncFnMut",
-                    rustc_type_ir::ClosureKind::FnOnce => "AsyncFnOnce",
+                let callable_kind = args.as_coroutine_closure().kind();
+                let kind = match (closure_kind, callable_kind) {
+                    (CoroutineKind::Async, rustc_type_ir::ClosureKind::Fn) => "AsyncFn",
+                    (CoroutineKind::Async, rustc_type_ir::ClosureKind::FnMut) => "AsyncFnMut",
+                    (CoroutineKind::Async, rustc_type_ir::ClosureKind::FnOnce) => "AsyncFnOnce",
+                    (_, rustc_type_ir::ClosureKind::Fn) => "Fn",
+                    (_, rustc_type_ir::ClosureKind::FnMut) => "FnMut",
+                    (_, rustc_type_ir::ClosureKind::FnOnce) => "FnOnce",
                 };
                 let coroutine_sig = args.as_coroutine_closure().coroutine_closure_sig();
                 let coroutine_sig = coroutine_sig.skip_binder();
@@ -1561,7 +1604,11 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 let coroutine_output = coroutine_sig.return_ty;
                 match f.closure_style {
                     ClosureStyle::ImplFn => write!(f, "impl {kind}(")?,
-                    ClosureStyle::RANotation => write!(f, "async |")?,
+                    ClosureStyle::RANotation => match closure_kind {
+                        CoroutineKind::Async => write!(f, "async |")?,
+                        CoroutineKind::Gen => write!(f, "gen |")?,
+                        CoroutineKind::AsyncGen => write!(f, "async gen |")?,
+                    },
                     _ => unreachable!(),
                 }
                 if coroutine_inputs.is_empty() {
@@ -1672,16 +1719,11 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
             }
             TyKind::Infer(..) => write!(f, "_")?,
             TyKind::Coroutine(coroutine_id, subst) => {
-                let InternedClosure(owner, expr_id) = coroutine_id.0.loc(db);
+                let kind = coroutine_id.0.loc(db).kind;
                 let CoroutineArgsParts { resume_ty, yield_ty, return_ty, .. } =
                     subst.split_coroutine_args();
-                let body = ExpressionStore::of(db, owner);
-                let expr = &body[expr_id];
-                match expr {
-                    hir_def::hir::Expr::Closure {
-                        closure_kind: hir_def::hir::ClosureKind::AsyncBlock { .. },
-                        ..
-                    } => {
+                match kind {
+                    HirClosureKind::Coroutine { kind: CoroutineKind::Async, .. } => {
                         let future_trait = f.lang_items().Future;
                         let output = future_trait.and_then(|t| {
                             t.trait_items(db)
@@ -1707,10 +1749,61 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                         return_ty.hir_fmt(f)?;
                         write!(f, ">")?;
                     }
-                    hir_def::hir::Expr::Closure {
-                        closure_kind: hir_def::hir::ClosureKind::Coroutine(..),
-                        ..
-                    } => {
+                    HirClosureKind::Coroutine { kind: CoroutineKind::Gen, .. } => {
+                        let iterator_trait = f.lang_items().Iterator;
+                        let item = iterator_trait.and_then(|t| {
+                            t.trait_items(db)
+                                .associated_type_by_name(&Name::new_symbol_root(sym::Item))
+                        });
+                        write!(f, "impl ")?;
+                        if let Some(t) = iterator_trait {
+                            f.start_location_link(t.into());
+                        }
+                        write!(f, "Iterator")?;
+                        if iterator_trait.is_some() {
+                            f.end_location_link();
+                        }
+                        write!(f, "<")?;
+                        if let Some(t) = item {
+                            f.start_location_link(t.into());
+                        }
+                        write!(f, "Item")?;
+                        if item.is_some() {
+                            f.end_location_link();
+                        }
+                        write!(f, " = ")?;
+                        yield_ty.hir_fmt(f)?;
+                        write!(f, ">")?;
+                    }
+                    HirClosureKind::Coroutine { kind: CoroutineKind::AsyncGen, .. } => {
+                        let async_iterator_trait = f.lang_items().AsyncIterator;
+                        let item = async_iterator_trait.and_then(|t| {
+                            t.trait_items(db)
+                                .associated_type_by_name(&Name::new_symbol_root(sym::Item))
+                        });
+                        write!(f, "impl ")?;
+                        if let Some(t) = async_iterator_trait {
+                            f.start_location_link(t.into());
+                        }
+                        write!(f, "AsyncIterator")?;
+                        if async_iterator_trait.is_some() {
+                            f.end_location_link();
+                        }
+                        write!(f, "<")?;
+                        if let Some(t) = item {
+                            f.start_location_link(t.into());
+                        }
+                        write!(f, "Item")?;
+                        if item.is_some() {
+                            f.end_location_link();
+                        }
+                        write!(f, " = ")?;
+                        let item_ty = async_gen_item_ty_from_yield_ty(f.lang_items(), yield_ty)
+                            .unwrap_or(yield_ty);
+                        item_ty.hir_fmt(f)?;
+                        write!(f, ">")?;
+                    }
+                    HirClosureKind::OldCoroutine(..) => {
                         if f.display_kind.is_source_code() {
                             return Err(HirDisplayError::DisplaySourceCodeError(
                                 DisplaySourceCodeError::Coroutine,
@@ -1726,7 +1819,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                         write!(f, " -> ")?;
                         return_ty.hir_fmt(f)?;
                     }
-                    _ => panic!("invalid expr for coroutine: {expr:?}"),
+                    _ => panic!("invalid kind for coroutine: {kind:?}"),
                 }
             }
             TyKind::CoroutineWitness(..) => write!(f, "{{coroutine witness}}")?,

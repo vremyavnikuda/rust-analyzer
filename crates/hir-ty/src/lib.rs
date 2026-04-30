@@ -62,7 +62,10 @@ use std::{hash::Hash, ops::ControlFlow};
 
 use hir_def::{
     CallableDefId, ExpressionStoreOwnerId, GenericDefId, TypeAliasId, TypeOrConstParamId,
-    TypeParamId, resolver::TypeNs, type_ref::Rawness,
+    TypeParamId,
+    hir::{ExprId, ExprOrPatId, PatId},
+    resolver::TypeNs,
+    type_ref::{Rawness, TypeRefId},
 };
 use hir_expand::name::Name;
 use indexmap::{IndexMap, map::Entry};
@@ -71,31 +74,35 @@ use macros::GenericTypeVisitable;
 use mir::{MirEvalError, VTableMap};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use rustc_type_ir::{
-    BoundVarIndexKind, TypeSuperVisitable, TypeVisitableExt, UpcastFrom,
+    BoundVarIndexKind, TypeSuperVisitable, TypeVisitableExt,
     inherent::{IntoKind, Ty as _},
 };
+use stdx::impl_from;
 use syntax::ast::{ConstArg, make};
 use traits::FnTrait;
 
 use crate::{
     db::HirDatabase,
     display::{DisplayTarget, HirDisplay},
-    infer::unify::InferenceTable,
     lower::SupertraitsInfo,
     next_solver::{
         AliasTy, Binder, BoundConst, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, Canonical,
-        CanonicalVarKind, CanonicalVarKinds, ClauseKind, Const, ConstKind, DbInterner, FnSig,
-        GenericArgs, PolyFnSig, Predicate, Region, RegionKind, TraitRef, Ty, TyKind, Tys, abi,
+        CanonicalVarKind, CanonicalVarKinds, ClauseKind, Const, ConstKind, DbInterner, GenericArgs,
+        PolyFnSig, Region, RegionKind, TraitRef, Ty, TyKind, TypingMode,
+        abi::Safety,
+        infer::{
+            DbInternerInferExt,
+            traits::{Obligation, ObligationCause},
+        },
+        obligation_ctxt::ObligationCtxt,
     },
 };
 
 pub use autoderef::autoderef;
 pub use infer::{
-    Adjust, Adjustment, AutoBorrow, BindingMode, InferenceDiagnostic, InferenceResult,
-    InferenceTyDiagnosticSource, OverloadedDeref, PointerCast,
-    cast::CastError,
-    closure::analysis::{CaptureKind, CapturedItem},
-    could_coerce, could_unify, could_unify_deeply, infer_query_with_inspect,
+    Adjust, Adjustment, AutoBorrow, BindingMode, ByRef, InferenceDiagnostic, InferenceResult,
+    InferenceTyDiagnosticSource, OverloadedDeref, PointerCast, cast::CastError, could_coerce,
+    could_unify, could_unify_deeply, infer_query_with_inspect,
 };
 pub use lower::{
     GenericPredicates, ImplTraits, LifetimeElisionKind, TyDefId, TyLoweringContext, ValueTyDefId,
@@ -108,6 +115,16 @@ pub use utils::{
     TargetFeatureIsSafeInTarget, Unsafety, all_super_traits, direct_super_traits,
     is_fn_unsafe_to_call, target_feature_is_safe_in_target,
 };
+
+pub mod closure_analysis {
+    pub use crate::infer::{
+        CaptureInfo, CaptureSourceStack, CapturedPlace, ClosureData, UpvarCapture,
+        closure::analysis::{
+            BorrowKind,
+            expr_use_visitor::{FakeReadCause, Place, PlaceBase, Projection, ProjectionKind},
+        },
+    };
+}
 
 /// A constant can have reference to other things. Memory map job is holding
 /// the necessary bits of memory of the const eval session to keep the constant
@@ -197,7 +214,7 @@ pub fn param_idx(db: &dyn HirDatabase, id: TypeOrConstParamId) -> Option<usize> 
     generics::generics(db, id.parent).type_or_const_param_idx(id)
 }
 
-#[derive(Debug, Copy, Clone, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FnAbi {
     Aapcs,
     AapcsUnwind,
@@ -237,21 +254,6 @@ pub enum FnAbi {
     X86Interrupt,
     RustPreserveNone,
     Unknown,
-}
-
-impl PartialEq for FnAbi {
-    fn eq(&self, _other: &Self) -> bool {
-        // FIXME: Proper equality breaks `coercion::two_closures_lub` test
-        true
-    }
-}
-
-impl Hash for FnAbi {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Required because of the FIXME above and due to us implementing `Eq`, without this
-        // we would break the `Hash` + `Eq` contract
-        core::mem::discriminant(&Self::Unknown).hash(state);
-    }
 }
 
 impl FnAbi {
@@ -532,68 +534,64 @@ pub fn associated_type_shorthand_candidates(
 /// To be used from `hir` only.
 pub fn callable_sig_from_fn_trait<'db>(
     self_ty: Ty<'db>,
-    trait_env: ParamEnvAndCrate<'db>,
+    param_env: ParamEnvAndCrate<'db>,
     db: &'db dyn HirDatabase,
 ) -> Option<(FnTrait, PolyFnSig<'db>)> {
-    let mut table = InferenceTable::new(db, trait_env.param_env, trait_env.krate, None);
-    let lang_items = table.interner().lang_items();
+    let ParamEnvAndCrate { param_env, krate } = param_env;
+    let interner = DbInterner::new_with(db, krate);
+    let infcx = interner.infer_ctxt().build(TypingMode::PostAnalysis);
+    let lang_items = interner.lang_items();
+    let cause = ObligationCause::dummy();
 
-    let fn_once_trait = FnTrait::FnOnce.get_id(lang_items)?;
+    let impls_trait = |trait_: FnTrait| {
+        let mut ocx = ObligationCtxt::new(&infcx);
+        let tupled_args = infcx.next_ty_var(Span::Dummy);
+        let args = GenericArgs::new_from_slice(&[self_ty.into(), tupled_args.into()]);
+        let trait_id = trait_.get_id(lang_items)?;
+        let trait_ref = TraitRef::new_from_args(interner, trait_id.into(), args);
+        let obligation = Obligation::new(interner, cause.clone(), param_env, trait_ref);
+        ocx.register_obligation(obligation);
+        if !ocx.try_evaluate_obligations().is_empty() {
+            return None;
+        }
+        let tupled_args =
+            infcx.resolve_vars_if_possible(tupled_args).replace_infer_with_error(interner);
+        if tupled_args.is_tuple() { Some(tupled_args) } else { None }
+    };
+
+    let (trait_, args) = 'find_trait: {
+        for trait_ in [FnTrait::Fn, FnTrait::FnMut, FnTrait::FnOnce] {
+            if let Some(args) = impls_trait(trait_) {
+                break 'find_trait (trait_, args);
+            }
+        }
+        return None;
+    };
+
+    let fn_once_trait = lang_items.FnOnce?;
     let output_assoc_type = fn_once_trait
         .trait_items(db)
         .associated_type_by_name(&Name::new_symbol_root(sym::Output))?;
-
-    // Register two obligations:
-    // - Self: FnOnce<?args_ty>
-    // - <Self as FnOnce<?args_ty>>::Output == ?ret_ty
-    let args_ty = table.next_ty_var();
-    let args = GenericArgs::new_from_slice(&[self_ty.into(), args_ty.into()]);
-    let trait_ref = TraitRef::new_from_args(table.interner(), fn_once_trait.into(), args);
-    let projection = Ty::new_alias(
-        table.interner(),
-        AliasTy::new_from_args(
-            table.interner(),
+    let output_projection = Ty::new_alias(
+        interner,
+        AliasTy::new(
+            interner,
             rustc_type_ir::Projection { def_id: output_assoc_type.into() },
-            args,
+            [self_ty, args],
         ),
     );
+    let mut ocx = ObligationCtxt::new(&infcx);
+    let ret = ocx.structurally_normalize_ty(&cause, param_env, output_projection).ok()?;
+    let ret = ret.replace_infer_with_error(interner);
 
-    let pred = Predicate::upcast_from(trait_ref, table.interner());
-    if !table.try_obligation(pred).no_solution() {
-        table.register_obligation(pred);
-        let return_ty = table.normalize_alias_ty(projection);
-        for fn_x in [FnTrait::Fn, FnTrait::FnMut, FnTrait::FnOnce] {
-            let fn_x_trait = fn_x.get_id(lang_items)?;
-            let trait_ref = TraitRef::new_from_args(table.interner(), fn_x_trait.into(), args);
-            if !table
-                .try_obligation(Predicate::upcast_from(trait_ref, table.interner()))
-                .no_solution()
-            {
-                let ret_ty = table.resolve_completely(return_ty);
-                let args_ty = table.resolve_completely(args_ty);
-                let TyKind::Tuple(params) = args_ty.kind() else {
-                    return None;
-                };
-                let inputs_and_output = Tys::new_from_iter(
-                    table.interner(),
-                    params.iter().chain(std::iter::once(ret_ty)),
-                );
-
-                return Some((
-                    fn_x,
-                    Binder::dummy(FnSig {
-                        inputs_and_output,
-                        c_variadic: false,
-                        safety: abi::Safety::Safe,
-                        abi: FnAbi::RustCall,
-                    }),
-                ));
-            }
-        }
-        unreachable!("It should at least implement FnOnce at this point");
-    } else {
-        None
-    }
+    let sig = Binder::dummy(interner.mk_fn_sig(
+        args.tuple_fields(),
+        ret,
+        false,
+        Safety::Safe,
+        FnAbi::Rust,
+    ));
+    Some((trait_, sig))
 }
 
 struct ParamCollector {
@@ -667,21 +665,40 @@ pub fn known_const_to_ast<'db>(
     Some(make::expr_const_value(konst.display(db, display_target).to_string().as_str()))
 }
 
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum DeclOrigin {
-    LetExpr,
-    /// from `let x = ..`
-    LocalDecl {
-        has_else: bool,
-    },
+/// A `Span` represents some location in lowered code - a type, expression or pattern.
+///
+/// It has no meaning outside its body therefore it should not exit the pass it was created in
+/// (e.g. inference). It is usually associated with a solver obligation or an infer var, which
+/// should also not cross the pass they were created in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Span {
+    ExprId(ExprId),
+    PatId(PatId),
+    TypeRefId(TypeRefId),
+    /// An unimportant location. Errors on this will be suppressed.
+    Dummy,
+}
+impl_from!(ExprId, PatId, TypeRefId for Span);
+
+impl From<ExprOrPatId> for Span {
+    fn from(value: ExprOrPatId) -> Self {
+        match value {
+            ExprOrPatId::ExprId(idx) => idx.into(),
+            ExprOrPatId::PatId(idx) => idx.into(),
+        }
+    }
 }
 
-/// Provides context for checking patterns in declarations. More specifically this
-/// allows us to infer array types if the pattern is irrefutable and allows us to infer
-/// the size of the array. See issue rust-lang/rust#76342.
-#[derive(Debug, Copy, Clone)]
-pub(crate) struct DeclContext {
-    pub(crate) origin: DeclOrigin,
+impl Span {
+    pub(crate) fn pick_best(a: Span, b: Span) -> Span {
+        // We prefer dummy spans to minimize the risk of false errors.
+        if b.is_dummy() { b } else { a }
+    }
+
+    #[inline]
+    pub fn is_dummy(&self) -> bool {
+        matches!(self, Self::Dummy)
+    }
 }
 
 pub fn setup_tracing() -> Option<tracing::subscriber::DefaultGuard> {

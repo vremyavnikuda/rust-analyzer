@@ -6,8 +6,12 @@ use either::Either;
 use hir_def::{
     AdtId, BuiltinDeriveImplId, CallableDefId, ConstId, ConstParamId, DefWithBodyId, EnumVariantId,
     ExpressionStoreOwnerId, FunctionId, GenericDefId, ImplId, LifetimeParamId, LocalFieldId,
-    StaticId, TraitId, TypeAliasId, VariantId, builtin_derive::BuiltinDeriveImplMethod,
-    db::DefDatabase, expr_store::ExpressionStore, hir::ExprId, layout::TargetDataLayout,
+    StaticId, TraitId, TypeAliasId, VariantId,
+    builtin_derive::BuiltinDeriveImplMethod,
+    db::DefDatabase,
+    expr_store::ExpressionStore,
+    hir::{ClosureKind, ExprId},
+    layout::TargetDataLayout,
 };
 use la_arena::ArenaMap;
 use salsa::plumbing::AsId;
@@ -147,7 +151,7 @@ pub trait HirDatabase: DefDatabase + std::fmt::Debug {
 
     #[salsa::invoke(crate::lower::const_param_ty_query)]
     #[salsa::transparent]
-    fn const_param_ty_ns<'db>(&'db self, def: ConstParamId) -> Ty<'db>;
+    fn const_param_ty<'db>(&'db self, def: ConstParamId) -> Ty<'db>;
 
     #[salsa::invoke(crate::lower::impl_trait_with_diagnostics)]
     #[salsa::transparent]
@@ -229,8 +233,12 @@ pub struct InternedOpaqueTyId {
     pub loc: ImplTraitId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct InternedClosure(pub ExpressionStoreOwnerId, pub ExprId);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InternedClosure {
+    pub owner: ExpressionStoreOwnerId,
+    pub expr: ExprId,
+    pub kind: ClosureKind,
+}
 
 #[salsa_macros::interned(constructor = new_impl, no_lifetime, debug, revisions = usize::MAX)]
 #[derive(PartialOrd, Ord)]
@@ -242,8 +250,8 @@ impl InternedClosureId {
     #[inline]
     pub fn new(db: &dyn HirDatabase, loc: InternedClosure) -> Self {
         if cfg!(debug_assertions) {
-            let store = ExpressionStore::of(db, loc.0);
-            let expr = &store[loc.1];
+            let store = ExpressionStore::of(db, loc.owner);
+            let expr = &store[loc.expr];
             assert!(
                 matches!(
                     expr,
@@ -270,14 +278,14 @@ impl InternedCoroutineId {
     #[inline]
     pub fn new(db: &dyn HirDatabase, loc: InternedClosure) -> Self {
         if cfg!(debug_assertions) {
-            let store = ExpressionStore::of(db, loc.0);
-            let expr = &store[loc.1];
+            let store = ExpressionStore::of(db, loc.owner);
+            let expr = &store[loc.expr];
             assert!(
                 matches!(
                     expr,
                     hir_def::hir::Expr::Closure {
-                        closure_kind: hir_def::hir::ClosureKind::Coroutine(_)
-                            | hir_def::hir::ClosureKind::AsyncBlock { .. },
+                        closure_kind: hir_def::hir::ClosureKind::OldCoroutine(_)
+                            | hir_def::hir::ClosureKind::Coroutine { .. },
                         ..
                     }
                 ),
@@ -299,13 +307,13 @@ impl InternedCoroutineClosureId {
     #[inline]
     pub fn new(db: &dyn HirDatabase, loc: InternedClosure) -> Self {
         if cfg!(debug_assertions) {
-            let store = ExpressionStore::of(db, loc.0);
-            let expr = &store[loc.1];
+            let store = ExpressionStore::of(db, loc.owner);
+            let expr = &store[loc.expr];
             assert!(
                 matches!(
                     expr,
                     hir_def::hir::Expr::Closure {
-                        closure_kind: hir_def::hir::ClosureKind::AsyncClosure,
+                        closure_kind: hir_def::hir::ClosureKind::CoroutineClosure(_),
                         ..
                     }
                 ),

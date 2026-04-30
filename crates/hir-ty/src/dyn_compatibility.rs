@@ -6,8 +6,8 @@ use hir_def::{
     AssocItemId, ConstId, FunctionId, GenericDefId, HasModule, TraitId, TypeAliasId,
     TypeOrConstParamId, TypeParamId,
     hir::generics::{GenericParams, LocalTypeOrConstParamId},
-    nameres::crate_def_map,
     signatures::{FunctionSignature, TraitFlags, TraitSignature},
+    unstable_features::UnstableFeatures,
 };
 use rustc_hash::FxHashSet;
 use rustc_type_ir::{
@@ -21,11 +21,14 @@ use crate::{
     db::{HirDatabase, InternedOpaqueTyId},
     lower::{GenericPredicates, associated_ty_item_bounds},
     next_solver::{
-        AliasTy, Binder, Clause, Clauses, DbInterner, EarlyBinder, GenericArgs, Goal, ParamEnv,
-        ParamTy, SolverDefId, TraitPredicate, TraitRef, Ty, TypingMode, infer::DbInternerInferExt,
+        AliasTy, Binder, Clause, Clauses, DbInterner, EarlyBinder, GenericArgs, ParamEnv, ParamTy,
+        SolverDefId, TraitPredicate, TraitRef, Ty, TypingMode,
+        infer::{
+            DbInternerInferExt,
+            traits::{Obligation, ObligationCause},
+        },
         mk_param,
     },
-    traits::next_trait_solve_in_ctxt,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -111,8 +114,9 @@ where
     // rustc checks for non-lifetime binders here, but we don't support HRTB yet
 
     let trait_data = trait_.trait_items(db);
+    let mut features = None;
     for (_, assoc_item) in &trait_data.items {
-        dyn_compatibility_violation_for_assoc_item(db, trait_, *assoc_item, cb)?;
+        dyn_compatibility_violation_for_assoc_item(db, &mut features, trait_, *assoc_item, cb)?;
     }
 
     ControlFlow::Continue(())
@@ -274,8 +278,9 @@ fn contains_illegal_self_type_reference<'db, T: rustc_type_ir::TypeVisitable<DbI
     t.visit_with(&mut visitor).is_break()
 }
 
-fn dyn_compatibility_violation_for_assoc_item<F>(
-    db: &dyn HirDatabase,
+fn dyn_compatibility_violation_for_assoc_item<'db, F>(
+    db: &'db dyn HirDatabase,
+    features: &mut Option<&'db UnstableFeatures>,
     trait_: TraitId,
     item: AssocItemId,
     cb: &mut F,
@@ -297,8 +302,10 @@ where
             })
         }
         AssocItemId::TypeAliasId(it) => {
-            let def_map = crate_def_map(db, trait_.krate(db));
-            if def_map.is_unstable_feature_enabled(&intern::sym::generic_associated_type_extended) {
+            if features
+                .get_or_insert_with(|| UnstableFeatures::query(db, trait_.krate(db)))
+                .generic_associated_type_extended
+            {
                 ControlFlow::Continue(())
             } else {
                 let generic_params = GenericParams::of(db, item.into());
@@ -470,12 +477,11 @@ fn receiver_is_dispatchable<'db>(
     // Receiver: DispatchFromDyn<Receiver[Self => U]>
     let predicate =
         TraitRef::new(interner, dispatch_from_dyn_did.into(), [receiver_ty, unsized_receiver_ty]);
-    let goal = Goal::new(interner, param_env, predicate);
+    let obligation = Obligation::new(interner, ObligationCause::dummy(), param_env, predicate);
 
     let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
     // the receiver is dispatchable iff the obligation holds
-    let res = next_trait_solve_in_ctxt(&infcx, goal);
-    res.map_or(false, |res| matches!(res.1, rustc_type_ir::solve::Certainty::Yes))
+    infcx.predicate_must_hold_modulo_regions(&obligation)
 }
 
 fn receiver_for_self_ty<'db>(

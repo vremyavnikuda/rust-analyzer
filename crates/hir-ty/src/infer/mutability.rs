@@ -32,13 +32,14 @@ impl<'db> InferenceContext<'_, 'db> {
                             };
                             if let Some(infer_ok) = Self::try_mutable_overloaded_place_op(
                                 &self.table,
+                                tgt_expr,
                                 source_ty,
                                 None,
                                 PlaceOp::Deref,
                             ) {
                                 self.table.register_predicates(infer_ok.obligations);
                             }
-                            *d = OverloadedDeref(Some(mutability));
+                            *d = OverloadedDeref(mutability);
                         }
                     }
                     Adjust::Borrow(b) => match b {

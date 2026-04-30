@@ -61,6 +61,9 @@ pub struct CompletionItem {
     pub documentation: Option<Documentation<'static>>,
 
     /// Whether this item is marked as deprecated
+    ///
+    /// NOTE: this field is used in the LSP protocol. For the use of this information in completion
+    /// scoring, see [`CompletionRelevance::is_deprecated`].
     pub deprecated: bool,
 
     /// If completing a function call, ask the editor to show parameter popup
@@ -84,7 +87,15 @@ pub struct CompletionItem {
     pub ref_match: Option<(CompletionItemRefMode, TextSize)>,
 
     /// The import data to add to completion's edits.
-    pub import_to_add: SmallVec<[String; 1]>,
+    pub import_to_add: SmallVec<[CompletionItemImport; 1]>,
+}
+
+#[derive(Clone, UpmapFromRaFixture)]
+pub struct CompletionItemImport {
+    /// The path to import.
+    pub path: String,
+    /// Whether to import `as _`.
+    pub as_underscore: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,6 +197,11 @@ pub struct CompletionRelevance {
     pub is_skipping_completion: bool,
     /// if inherent impl already exists in current module, user may not want to implement it again.
     pub has_local_inherent_impl: bool,
+    /// Set when the completion item is deprecated.
+    ///
+    /// NOTE: This is duplicated from [`CompletionItem::deprecated`] in order to allow using this
+    /// information in the calculation of the relevance score.
+    pub is_deprecated: bool,
 }
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct CompletionRelevanceTraitInfo {
@@ -278,6 +294,7 @@ impl CompletionRelevance {
             function,
             is_skipping_completion,
             has_local_inherent_impl,
+            is_deprecated,
         } = self;
 
         // only applicable for completions within use items
@@ -351,6 +368,11 @@ impl CompletionRelevance {
         };
 
         if has_local_inherent_impl {
+            score -= 5;
+        }
+
+        // lower rank for deprecated items
+        if is_deprecated {
             score -= 5;
         }
 
@@ -582,10 +604,24 @@ impl Builder {
             None => TextEdit::replace(self.source_range, insert_text),
         };
 
+        // Copy `deprecated` to `self.relevance.is_deprecated`
+        let relevance = CompletionRelevance { is_deprecated: self.deprecated, ..self.relevance };
+
         let import_to_add = self
             .imports_to_add
             .into_iter()
-            .map(|import| import.import_path.display(db, self.edition).to_string())
+            .map(|import| {
+                let path = import.import_path.display(db, self.edition).to_string();
+                let as_underscore =
+                    if let hir::ItemInNs::Types(hir::ModuleDef::Trait(trait_to_import)) =
+                        import.item_to_import
+                    {
+                        trait_to_import.prefer_underscore_import(db)
+                    } else {
+                        false
+                    };
+                CompletionItemImport { path, as_underscore }
+            })
             .collect();
 
         CompletionItem {
@@ -603,7 +639,7 @@ impl Builder {
             kind: self.kind,
             deprecated: self.deprecated,
             trigger_call_info: self.trigger_call_info,
-            relevance: self.relevance,
+            relevance,
             ref_match: self.ref_match,
             import_to_add,
         }
@@ -674,6 +710,15 @@ impl Builder {
         self
     }
     pub(crate) fn set_relevance(&mut self, relevance: CompletionRelevance) -> &mut Builder {
+        // The default value of `CompletionRelevance.is_deprecated` is `false`, so it being `true`
+        // would mean it was set manually. Advise using the other function instead.
+        //
+        // This is technically not necessary, because `deprecated` will get reconciled in
+        // `Builder::build` anyway -- it just helps keep the callers consistent.
+        assert!(
+            !relevance.is_deprecated,
+            "`deprecated` should be set using `Builder::set_deprecated` instead"
+        );
         self.relevance = relevance;
         self
     }
@@ -708,8 +753,24 @@ mod tests {
     use test_utils::assert_eq_text;
 
     use super::{
-        CompletionRelevance, CompletionRelevancePostfixMatch, CompletionRelevanceTypeMatch,
+        CompletionItem, CompletionItemKind, CompletionRelevance, CompletionRelevancePostfixMatch,
+        CompletionRelevanceTypeMatch,
     };
+
+    #[test]
+    fn builder_deprecated_from_set_deprecated() {
+        // setting just `item.deprecated` also sets `item.relevance.is_deprecated`
+        let mut builder = CompletionItem::new(
+            CompletionItemKind::Expression,
+            Default::default(),
+            "",
+            syntax::Edition::DEFAULT,
+        );
+        builder.set_deprecated(true);
+        let item = builder.build(&Default::default());
+        assert!(item.deprecated);
+        assert!(item.relevance.is_deprecated);
+    }
 
     /// Check that these are CompletionRelevance are sorted in ascending order
     /// by their relevance score.

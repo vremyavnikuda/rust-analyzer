@@ -17,8 +17,8 @@ use crate::{
     attrs::AttrFlags,
     expr_store::path::{GenericArg, GenericArgs},
     hir::{
-        Array, BindingAnnotation, CaptureBy, ClosureKind, Literal, Movability, RecordSpread,
-        Statement,
+        Array, BindingAnnotation, CaptureBy, ClosureKind, CoroutineKind, Literal, Movability,
+        RecordSpread, Statement,
         generics::{GenericParams, WherePredicate},
     },
     lang_item::LangItemTarget,
@@ -401,7 +401,7 @@ fn print_generic_params(db: &dyn DefDatabase, generic_params: &GenericParams, p:
 pub fn print_expr_hir(
     db: &dyn DefDatabase,
     store: &ExpressionStore,
-    _owner: DefWithBodyId,
+    _owner: ExpressionStoreOwnerId,
     expr: ExprId,
     edition: Edition,
 ) -> String {
@@ -420,7 +420,7 @@ pub fn print_expr_hir(
 pub fn print_pat_hir(
     db: &dyn DefDatabase,
     store: &ExpressionStore,
-    _owner: DefWithBodyId,
+    _owner: ExpressionStoreOwnerId,
     pat: PatId,
     oneline: bool,
     edition: Edition,
@@ -668,10 +668,7 @@ impl Printer<'_> {
                 }
             }
             Expr::RecordLit { path, fields, spread } => {
-                match path {
-                    Some(path) => self.print_path(path),
-                    None => w!(self, "�"),
-                }
+                self.print_path(path);
 
                 w!(self, "{{");
                 let edition = self.edition;
@@ -764,28 +761,36 @@ impl Printer<'_> {
                 let mut body = *body;
                 let mut print_pipes = true;
                 match closure_kind {
-                    ClosureKind::Coroutine(Movability::Static) => {
+                    ClosureKind::OldCoroutine(Movability::Static) => {
                         w!(self, "static ");
                     }
-                    ClosureKind::AsyncClosure => {
+                    ClosureKind::CoroutineClosure(kind) => {
                         if let Expr::Closure {
                             body: inner_body,
-                            closure_kind: ClosureKind::AsyncBlock { .. },
+                            closure_kind: ClosureKind::Coroutine { .. },
                             ..
                         } = self.store[body]
                         {
                             body = inner_body;
                         } else {
-                            never!("async closure should always have an async block body");
+                            never!("coroutine closure should always have a coroutine body");
                         }
 
-                        w!(self, "async ");
+                        match kind {
+                            CoroutineKind::Async => w!(self, "async "),
+                            CoroutineKind::Gen => w!(self, "gen "),
+                            CoroutineKind::AsyncGen => w!(self, "async gen "),
+                        }
                     }
-                    ClosureKind::AsyncBlock { .. } => {
-                        w!(self, "async ");
+                    ClosureKind::Coroutine { kind, .. } => {
+                        match kind {
+                            CoroutineKind::Async => w!(self, "async "),
+                            CoroutineKind::Gen => w!(self, "gen "),
+                            CoroutineKind::AsyncGen => w!(self, "async gen "),
+                        }
                         print_pipes = false;
                     }
-                    ClosureKind::Closure | ClosureKind::Coroutine(Movability::Movable) => (),
+                    ClosureKind::Closure | ClosureKind::OldCoroutine(Movability::Movable) => (),
                 }
                 match capture_by {
                     CaptureBy::Value => {
@@ -898,6 +903,7 @@ impl Printer<'_> {
 
         match pat {
             Pat::Missing => w!(self, "�"),
+            Pat::Rest => w!(self, ".."),
             Pat::Wild => w!(self, "_"),
             Pat::Tuple { args, ellipsis } => {
                 w!(self, "(");
@@ -923,10 +929,7 @@ impl Printer<'_> {
                 w!(self, ")");
             }
             Pat::Record { path, args, ellipsis } => {
-                match path {
-                    Some(path) => self.print_path(path),
-                    None => w!(self, "�"),
-                }
+                self.print_path(path);
 
                 w!(self, " {{");
                 let edition = self.edition;
@@ -1004,10 +1007,7 @@ impl Printer<'_> {
                 }
             }
             Pat::TupleStruct { path, args, ellipsis } => {
-                match path {
-                    Some(path) => self.print_path(path),
-                    None => w!(self, "�"),
-                }
+                self.print_path(path);
                 w!(self, "(");
                 for (i, arg) in args.iter().enumerate() {
                     if i != 0 {

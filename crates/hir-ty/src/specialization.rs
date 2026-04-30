@@ -1,13 +1,13 @@
 //! Impl specialization related things
 
 use hir_def::{
-    ExpressionStoreOwnerId, GenericDefId, HasModule, ImplId, nameres::crate_def_map,
-    signatures::ImplSignature,
+    ExpressionStoreOwnerId, GenericDefId, HasModule, ImplId, signatures::ImplSignature,
+    unstable_features::UnstableFeatures,
 };
-use intern::sym;
 use tracing::debug;
 
 use crate::{
+    Span,
     db::HirDatabase,
     lower::GenericPredicates,
     next_solver::{
@@ -92,7 +92,7 @@ fn specializes_query(
 
     let mut ocx = ObligationCtxt::new(&infcx);
 
-    let parent_args = infcx.fresh_args_for_item(parent_impl_def_id.into());
+    let parent_args = infcx.fresh_args_for_item(Span::Dummy, parent_impl_def_id.into());
     let parent_impl_trait_ref = db
         .impl_trait(parent_impl_def_id)
         .expect("expected source impl to be a trait impl")
@@ -153,10 +153,8 @@ pub(crate) fn specializes(
     // `#[allow_internal_unstable(specialization)]`, but `#[allow_internal_unstable]`
     // is an internal feature, std is not using it for specialization nor is likely to
     // ever use it, and we don't have the span information necessary to replicate that.
-    let def_map = crate_def_map(db, module.krate(db));
-    if !def_map.is_unstable_feature_enabled(&sym::specialization)
-        && !def_map.is_unstable_feature_enabled(&sym::min_specialization)
-    {
+    let features = UnstableFeatures::query(db, module.krate(db));
+    if !features.specialization && !features.min_specialization {
         return false;
     }
 

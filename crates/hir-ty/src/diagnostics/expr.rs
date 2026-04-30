@@ -15,7 +15,7 @@ use intern::sym;
 use itertools::Itertools;
 use rustc_hash::FxHashSet;
 use rustc_pattern_analysis::constructor::Constructor;
-use rustc_type_ir::inherent::{AdtDef, IntoKind};
+use rustc_type_ir::inherent::IntoKind;
 use syntax::{
     AstNode,
     ast::{self, UnaryOp},
@@ -218,9 +218,7 @@ impl<'db> ExprValidator<'db> {
         // Note: Skipping the entire diagnostic rather than just not including a faulty match arm is
         // preferred to avoid the chance of false positives.
         for arm in arms {
-            let Some(pat_ty) = self.infer.type_of_pat_with_adjust(arm.pat) else {
-                return;
-            };
+            let pat_ty = self.infer.type_of_pat_with_adjust(arm.pat);
             if pat_ty.references_non_lt_error() {
                 return;
             }
@@ -238,8 +236,7 @@ impl<'db> ExprValidator<'db> {
             if (pat_ty == scrut_ty
                 || scrut_ty
                     .as_reference()
-                    .map(|(match_expr_ty, ..)| match_expr_ty == pat_ty)
-                    .unwrap_or(false))
+                    .is_none_or(|(match_expr_ty, ..)| match_expr_ty == pat_ty))
                 && types_of_subpatterns_do_match(arm.pat, self.body, self.infer)
             {
                 // If we had a NotUsefulMatchArm diagnostic, we could
@@ -314,7 +311,7 @@ impl<'db> ExprValidator<'db> {
                 value_or_partial.is_none_or(|v| !matches!(v, ValueNs::StaticId(_)))
             }
             Expr::Field { expr, .. } => match self.infer.expr_ty(*expr).kind() {
-                TyKind::Adt(adt, ..) if matches!(adt.def_id().0, AdtId::UnionId(_)) => false,
+                TyKind::Adt(adt, ..) if matches!(adt.def_id(), AdtId::UnionId(_)) => false,
                 _ => self.is_known_valid_scrutinee(*expr),
             },
             Expr::Index { base, .. } => self.is_known_valid_scrutinee(*base),

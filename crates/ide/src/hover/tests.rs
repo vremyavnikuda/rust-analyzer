@@ -423,7 +423,7 @@ fn main() {
 
             ## Captures
             * `x.f1` by move
-            * `(*x.f2.0.0).f` by mutable borrow
+            * `x.f2.0.0.f` by mutable borrow
         "#]],
     );
     check(
@@ -3392,7 +3392,7 @@ fn main() { let foo_test = unsafe { fo$0o(1, 2, 3); } }
             ```
 
             ```rust
-            pub unsafe fn foo(bar: i32, ...) -> i32
+            pub unsafe extern "C" fn foo(bar: i32, ...) -> i32
             ```
         "#]],
     );
@@ -9197,7 +9197,7 @@ extern "C" {
             ```
 
             ```rust
-            unsafe fn fun()
+            unsafe extern "C" fn fun()
             ```
         "#]],
     );

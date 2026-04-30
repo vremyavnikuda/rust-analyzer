@@ -38,7 +38,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
             && !rhs_ty.is_ty_var()
             && is_builtin_binop(lhs_ty, rhs_ty, category)
         {
-            self.enforce_builtin_binop_types(lhs_ty, rhs_ty, category);
+            self.enforce_builtin_binop_types(expr, lhs_ty, rhs_ty, category);
             self.types.types.unit
         } else {
             return_ty
@@ -107,7 +107,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                     && is_builtin_binop(lhs_ty, rhs_ty, category)
                 {
                     let builtin_return_ty =
-                        self.enforce_builtin_binop_types(lhs_ty, rhs_ty, category);
+                        self.enforce_builtin_binop_types(expr, lhs_ty, rhs_ty, category);
                     _ = self.demand_eqtype(expr.into(), builtin_return_ty, return_ty);
                     builtin_return_ty
                 } else {
@@ -119,6 +119,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
 
     fn enforce_builtin_binop_types(
         &mut self,
+        expr: ExprId,
         lhs_ty: Ty<'db>,
         rhs_ty: Ty<'db>,
         category: BinOpCategory,
@@ -131,8 +132,8 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
 
         match category {
             BinOpCategory::Shortcircuit => {
-                self.demand_suptype(self.types.types.bool, lhs_ty);
-                self.demand_suptype(self.types.types.bool, rhs_ty);
+                _ = self.demand_suptype(expr.into(), self.types.types.bool, lhs_ty);
+                _ = self.demand_suptype(expr.into(), self.types.types.bool, rhs_ty);
                 self.types.types.bool
             }
 
@@ -143,13 +144,13 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
 
             BinOpCategory::Math | BinOpCategory::Bitwise => {
                 // both LHS and RHS and result will have the same type
-                self.demand_suptype(lhs_ty, rhs_ty);
+                _ = self.demand_suptype(expr.into(), lhs_ty, rhs_ty);
                 lhs_ty
             }
 
             BinOpCategory::Comparison => {
                 // both LHS and RHS and result will have the same type
-                self.demand_suptype(lhs_ty, rhs_ty);
+                _ = self.demand_suptype(expr.into(), lhs_ty, rhs_ty);
                 self.types.types.bool
             }
         }
@@ -179,7 +180,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                 // e.g., adding `&'a T` and `&'b T`, given `&'x T: Add<&'x T>`, will result
                 // in `&'a T <: &'x T` and `&'b T <: &'x T`, instead of `'a = 'b = 'x`.
                 let lhs_ty = self.infer_expr_no_expect(lhs_expr, ExprIsRead::Yes);
-                let fresh_var = self.table.next_ty_var();
+                let fresh_var = self.table.next_ty_var(lhs_expr.into());
                 self.demand_coerce(lhs_expr, lhs_ty, fresh_var, AllowTwoPhase::No, ExprIsRead::Yes)
             }
         };
@@ -191,7 +192,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         // using this variable as the expected type, which sometimes lets
         // us do better coercions than we would be able to do otherwise,
         // particularly for things like `String + &String`.
-        let rhs_ty_var = self.table.next_ty_var();
+        let rhs_ty_var = self.table.next_ty_var(rhs_expr.into());
         let result = self.lookup_op_method(
             lhs_ty,
             Some((rhs_expr, rhs_ty_var)),

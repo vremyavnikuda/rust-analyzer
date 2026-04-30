@@ -6,7 +6,7 @@
 use cfg::{CfgExpr, CfgOptions};
 use either::Either;
 use hir_def::{
-    DefWithBodyId, GenericParamId, SyntheticSyntax,
+    DefWithBodyId, GenericParamId, HasModule, SyntheticSyntax,
     expr_store::{
         ExprOrPatPtr, ExpressionStoreSourceMap, hir_assoc_type_binding_to_ast,
         hir_generic_arg_to_ast, hir_segment_to_ast_segment,
@@ -19,6 +19,7 @@ use hir_ty::{
     PathLoweringDiagnostic, TyLoweringDiagnostic, TyLoweringDiagnosticKind,
     db::HirDatabase,
     diagnostics::{BodyValidationDiagnostic, UnsafetyReason},
+    display::{DisplayTarget, HirDisplay},
 };
 use syntax::{
     AstNode, AstPtr, SyntaxError, SyntaxNodePtr, TextRange,
@@ -57,11 +58,15 @@ diagnostics![AnyDiagnostic<'db> ->
     BreakOutsideOfLoop,
     CastToUnsized<'db>,
     ExpectedFunction<'db>,
+    GenericDefaultRefersToSelf,
     InactiveCode,
     IncoherentImpl,
     IncorrectCase,
+    IncorrectGenericsLen,
+    IncorrectGenericsOrder,
     InvalidCast<'db>,
     InvalidDeriveTarget,
+    InvalidLhsOfAssignment,
     MacroDefError,
     MacroError,
     MacroExpansionParseError,
@@ -74,7 +79,9 @@ diagnostics![AnyDiagnostic<'db> ->
     MovedOutOfRef<'db>,
     NeedMut,
     NonExhaustiveLet,
+    NonExhaustiveRecordExpr,
     NoSuchField,
+    PatternArgInExternFn,
     PrivateAssocItem,
     PrivateField,
     RemoveTrailingReturn,
@@ -102,10 +109,9 @@ diagnostics![AnyDiagnostic<'db> ->
     GenericArgsProhibited,
     ParenthesizedGenericArgsWithoutFnTrait,
     BadRtn,
-    IncorrectGenericsLen,
-    IncorrectGenericsOrder,
     MissingLifetime,
     ElidedLifetimesInPath,
+    TypeMustBeKnown<'db>,
 ];
 
 #[derive(Debug)]
@@ -312,6 +318,11 @@ pub struct NonExhaustiveLet {
 }
 
 #[derive(Debug)]
+pub struct NonExhaustiveRecordExpr {
+    pub expr: InFile<ExprOrPatPtr>,
+}
+
+#[derive(Debug)]
 pub struct TypeMismatch<'db> {
     pub expr_or_pat: InFile<ExprOrPatPtr>,
     pub expected: Type<'db>,
@@ -442,6 +453,12 @@ pub struct ElidedLifetimesInPath {
     pub hard_error: bool,
 }
 
+#[derive(Debug)]
+pub struct TypeMustBeKnown<'db> {
+    pub at_point: InFile<AstPtr<Either<ast::Type, Either<ast::Expr, ast::Pat>>>>,
+    pub top_term: Option<Either<Type<'db>, String>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericArgKind {
     Lifetime,
@@ -463,6 +480,22 @@ impl GenericArgKind {
 pub struct IncorrectGenericsOrder {
     pub provided_arg: InFile<AstPtr<ast::GenericArg>>,
     pub expected_kind: GenericArgKind,
+}
+
+#[derive(Debug)]
+pub struct GenericDefaultRefersToSelf {
+    /// The `Self` segment.
+    pub segment: InFile<AstPtr<ast::PathSegment>>,
+}
+
+#[derive(Debug)]
+pub struct InvalidLhsOfAssignment {
+    pub lhs: InFile<AstPtr<Either<ast::Expr, ast::Pat>>>,
+}
+
+#[derive(Debug)]
+pub struct PatternArgInExternFn {
+    pub node: InFile<AstPtr<ast::Pat>>,
 }
 
 impl<'db> AnyDiagnostic<'db> {
@@ -536,59 +569,47 @@ impl<'db> AnyDiagnostic<'db> {
                 }
             }
             BodyValidationDiagnostic::MissingMatchArms { match_expr, uncovered_patterns } => {
-                match source_map.expr_syntax(match_expr) {
-                    Ok(source_ptr) => {
-                        let root = source_ptr.file_syntax(db);
-                        if let Either::Left(ast::Expr::MatchExpr(match_expr)) =
-                            &source_ptr.value.to_node(&root)
-                        {
-                            match match_expr.expr() {
-                                Some(scrut_expr) if match_expr.match_arm_list().is_some() => {
-                                    return Some(
-                                        MissingMatchArms {
-                                            scrutinee_expr: InFile::new(
-                                                source_ptr.file_id,
-                                                AstPtr::new(&scrut_expr),
-                                            ),
-                                            uncovered_patterns,
-                                        }
-                                        .into(),
-                                    );
-                                }
-                                _ => {}
-                            }
+                if let Ok(source_ptr) = source_map.expr_syntax(match_expr)
+                    && let root = source_ptr.file_syntax(db)
+                    && let Either::Left(ast::Expr::MatchExpr(match_expr)) =
+                        source_ptr.value.to_node(&root)
+                    && let Some(scrut_expr) = match_expr.expr()
+                    && match_expr.match_arm_list().is_some()
+                {
+                    return Some(
+                        MissingMatchArms {
+                            scrutinee_expr: InFile::new(
+                                source_ptr.file_id,
+                                AstPtr::new(&scrut_expr),
+                            ),
+                            uncovered_patterns,
                         }
-                    }
-                    Err(SyntheticSyntax) => (),
+                        .into(),
+                    );
                 }
             }
             BodyValidationDiagnostic::NonExhaustiveLet { pat, uncovered_patterns } => {
-                match source_map.pat_syntax(pat) {
-                    Ok(source_ptr) => {
-                        if let Some(ast_pat) = source_ptr.value.cast::<ast::Pat>() {
-                            return Some(
-                                NonExhaustiveLet {
-                                    pat: InFile::new(source_ptr.file_id, ast_pat),
-                                    uncovered_patterns,
-                                }
-                                .into(),
-                            );
+                if let Ok(source_ptr) = source_map.pat_syntax(pat)
+                    && let Some(ast_pat) = source_ptr.value.cast::<ast::Pat>()
+                {
+                    return Some(
+                        NonExhaustiveLet {
+                            pat: InFile::new(source_ptr.file_id, ast_pat),
+                            uncovered_patterns,
                         }
-                    }
-                    Err(SyntheticSyntax) => {}
+                        .into(),
+                    );
                 }
             }
             BodyValidationDiagnostic::RemoveTrailingReturn { return_expr } => {
-                if let Ok(source_ptr) = source_map.expr_syntax(return_expr) {
+                if let Ok(source_ptr) = source_map.expr_syntax(return_expr)
                     // Filters out desugared return expressions (e.g. desugared try operators).
-                    if let Some(ptr) = source_ptr.value.cast::<ast::ReturnExpr>() {
-                        return Some(
-                            RemoveTrailingReturn {
-                                return_expr: InFile::new(source_ptr.file_id, ptr),
-                            }
+                    && let Some(ptr) = source_ptr.value.cast::<ast::ReturnExpr>()
+                {
+                    return Some(
+                        RemoveTrailingReturn { return_expr: InFile::new(source_ptr.file_id, ptr) }
                             .into(),
-                        );
-                    }
+                    );
                 }
             }
             BodyValidationDiagnostic::RemoveUnnecessaryElse { if_expr } => {
@@ -622,6 +643,12 @@ impl<'db> AnyDiagnostic<'db> {
             source_map
                 .pat_syntax(pat)
                 .inspect_err(|_| stdx::never!("inference diagnostic in desugared pattern"))
+                .ok()
+        };
+        let type_syntax = |pat| {
+            source_map
+                .type_syntax(pat)
+                .inspect_err(|_| stdx::never!("inference diagnostic in desugared type"))
                 .ok()
         };
         let expr_or_pat_syntax = |id| match id {
@@ -711,21 +738,18 @@ impl<'db> AnyDiagnostic<'db> {
                 let expr = expr_syntax(expr)?;
                 BreakOutsideOfLoop { expr, is_break, bad_value_break }.into()
             }
+            &InferenceDiagnostic::NonExhaustiveRecordExpr { expr } => {
+                NonExhaustiveRecordExpr { expr: expr_syntax(expr)? }.into()
+            }
             InferenceDiagnostic::TypedHole { expr, expected } => {
                 let expr = expr_syntax(*expr)?;
                 TypedHole { expr, expected: Type::new(db, def, expected.as_ref()) }.into()
             }
             &InferenceDiagnostic::MismatchedTupleStructPatArgCount { pat, expected, found } => {
-                let expr_or_pat = match pat {
-                    ExprOrPatId::ExprId(expr) => expr_syntax(expr)?,
-                    ExprOrPatId::PatId(pat) => {
-                        let InFile { file_id, value } = pat_syntax(pat)?;
-
-                        // cast from Either<Pat, SelfParam> -> Either<_, Pat>
-                        let ptr = AstPtr::try_from_raw(value.syntax_node_ptr())?;
-                        InFile { file_id, value: ptr }
-                    }
-                };
+                let InFile { file_id, value } = pat_syntax(pat)?;
+                // cast from Either<Pat, SelfParam> -> Either<_, Pat>
+                let ptr = AstPtr::try_from_raw(value.syntax_node_ptr())?;
+                let expr_or_pat = InFile { file_id, value: ptr };
                 MismatchedTupleStructPatArgCount { expr_or_pat, expected, found }.into()
             }
             InferenceDiagnostic::CastToUnsized { expr, cast_ty } => {
@@ -800,6 +824,34 @@ impl<'db> AnyDiagnostic<'db> {
                 let provided_arg = InFile::new(file_id, AstPtr::new(&provided_arg));
                 let expected_kind = GenericArgKind::from_id(param_id);
                 IncorrectGenericsOrder { provided_arg, expected_kind }.into()
+            }
+            &InferenceDiagnostic::InvalidLhsOfAssignment { lhs } => {
+                let lhs = expr_syntax(lhs)?;
+                InvalidLhsOfAssignment { lhs }.into()
+            }
+            &InferenceDiagnostic::TypeMustBeKnown { at_point, ref top_term } => {
+                let at_point = match at_point {
+                    hir_ty::Span::ExprId(idx) => expr_syntax(idx)?.map(|it| it.wrap_right()),
+                    hir_ty::Span::PatId(idx) => pat_syntax(idx)?.map(|it| it.wrap_right()),
+                    hir_ty::Span::TypeRefId(idx) => type_syntax(idx)?.map(|it| it.wrap_left()),
+                    hir_ty::Span::Dummy => unreachable!(
+                        "should never create TypeMustBeKnown diagnostic for dummy spans"
+                    ),
+                };
+                let top_term = top_term.as_ref().map(|top_term| match top_term.as_ref().kind() {
+                    rustc_type_ir::GenericArgKind::Type(ty) => Either::Left(Type {
+                        ty,
+                        env: crate::body_param_env_from_has_crate(db, def),
+                    }),
+                    // FIXME: Printing the const to string is definitely not the correct thing to do here.
+                    rustc_type_ir::GenericArgKind::Const(konst) => Either::Right(
+                        konst.display(db, DisplayTarget::from_crate(db, def.krate(db))).to_string(),
+                    ),
+                    rustc_type_ir::GenericArgKind::Lifetime(_) => {
+                        unreachable!("we currently don't emit TypeMustBeKnown for lifetimes")
+                    }
+                });
+                TypeMustBeKnown { at_point, top_term }.into()
             }
         })
     }
@@ -893,6 +945,11 @@ impl<'db> AnyDiagnostic<'db> {
                     hard_error,
                 }
                 .into()
+            }
+            PathLoweringDiagnostic::GenericDefaultRefersToSelf { segment } => {
+                let segment = hir_segment_to_ast_segment(&path.value, segment)?;
+                let segment = path.with_value(AstPtr::new(&segment));
+                GenericDefaultRefersToSelf { segment }.into()
             }
         })
     }

@@ -4,24 +4,24 @@ use std::{fmt, ops::ControlFlow};
 
 use intern::{Interned, InternedRef, InternedSliceRef, impl_internable};
 use macros::GenericTypeVisitable;
+use rustc_abi::ReprOptions;
 use rustc_ast_ir::{FloatTy, IntTy, UintTy};
 pub use tls_cache::clear_tls_solver_cache;
 pub use tls_db::{attach_db, attach_db_allow_change, with_attached_db};
 
 use base_db::Crate;
 use hir_def::{
-    AdtId, CallableDefId, DefWithBodyId, EnumVariantId, ExpressionStoreOwnerId, HasModule,
+    AdtId, CallableDefId, DefWithBodyId, EnumId, ExpressionStoreOwnerId, HasModule,
     ItemContainerId, StructId, UnionId, VariantId,
     attrs::AttrFlags,
     expr_store::{Body, ExpressionStore},
+    hir::{ClosureKind as HirClosureKind, CoroutineKind as HirCoroutineKind},
     lang_item::LangItems,
     signatures::{
-        EnumSignature, FieldData, FnFlags, FunctionSignature, ImplFlags, ImplSignature,
+        EnumFlags, EnumSignature, FnFlags, FunctionSignature, ImplFlags, ImplSignature,
         StructFlags, StructSignature, TraitFlags, TraitSignature, UnionSignature,
     },
 };
-use la_arena::Idx;
-use rustc_abi::{ReprFlags, ReprOptions};
 use rustc_hash::FxHashSet;
 use rustc_index::bit_set::DenseBitSet;
 use rustc_type_ir::{
@@ -33,11 +33,11 @@ use rustc_type_ir::{
     fast_reject,
     inherent::{self, Const as _, GenericsOf, IntoKind, SliceLike as _, Span as _, Ty as _},
     lang_items::{SolverAdtLangItem, SolverLangItem, SolverTraitLangItem},
-    solve::SizedTraitKind,
+    solve::{AdtDestructorKind, SizedTraitKind},
 };
 
 use crate::{
-    FnAbi,
+    FnAbi, Span,
     db::{HirDatabase, InternedClosure, InternedCoroutineId},
     lower::GenericPredicates,
     method_resolution::TraitImpls,
@@ -327,6 +327,7 @@ unsafe impl Sync for DbInterner<'_> {}
 impl<'db> DbInterner<'db> {
     // FIXME(next-solver): remove this method
     pub fn conjure() -> DbInterner<'db> {
+        // Here we can not reinit the cache since we do that when we attach the db.
         crate::with_attached_db(|db| DbInterner {
             db: unsafe { std::mem::transmute::<&dyn HirDatabase, &'db dyn HirDatabase>(db) },
             krate: None,
@@ -339,10 +340,13 @@ impl<'db> DbInterner<'db> {
     ///
     /// Elaboration is a special kind: it needs lang items (for `Sized`), therefore it needs `new_with()`.
     pub fn new_no_crate(db: &'db dyn HirDatabase) -> Self {
+        // We do not reinit the cache here, since anything accessing the cache needs an InferCtxt,
+        // and we panic when trying to construct an InferCtxt for an Interner without a crate.
         DbInterner { db, krate: None, lang_items: None }
     }
 
     pub fn new_with(db: &'db dyn HirDatabase, krate: Crate) -> DbInterner<'db> {
+        tls_cache::reinit_cache(db);
         DbInterner {
             db,
             krate: Some(krate),
@@ -378,13 +382,9 @@ impl<'db> DbInterner<'db> {
     }
 }
 
-// This is intentionally left as `()`
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Span(());
-
 impl<'db> inherent::Span<DbInterner<'db>> for Span {
     fn dummy() -> Self {
-        Span(())
+        Span::Dummy
     }
 }
 
@@ -418,266 +418,167 @@ pub struct AllocId;
 
 interned_slice!(VariancesOfStorage, VariancesOf, StoredVariancesOf, variances, Variance, Variance);
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct VariantIdx(usize);
-
-// FIXME: could/should store actual data?
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum VariantDef {
-    Struct(StructId),
-    Union(UnionId),
-    Enum(EnumVariantId),
-}
-
-impl VariantDef {
-    pub fn id(&self) -> VariantId {
-        match self {
-            VariantDef::Struct(struct_id) => VariantId::StructId(*struct_id),
-            VariantDef::Union(union_id) => VariantId::UnionId(*union_id),
-            VariantDef::Enum(enum_variant_id) => VariantId::EnumVariantId(*enum_variant_id),
-        }
-    }
-
-    pub fn fields(&self, db: &dyn HirDatabase) -> Vec<(Idx<FieldData>, FieldData)> {
-        let id: VariantId = match self {
-            VariantDef::Struct(it) => (*it).into(),
-            VariantDef::Union(it) => (*it).into(),
-            VariantDef::Enum(it) => (*it).into(),
-        };
-        id.fields(db).fields().iter().map(|(id, data)| (id, data.clone())).collect()
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct AdtFlags: u8 {
+        const IS_FUNDAMENTAL = 1 << 0;
+        const IS_PACKED = 1 << 1;
+        const HAS_REPR = 1 << 2;
+        const IS_PHANTOM_DATA = 1 << 3;
+        const IS_MANUALLY_DROP = 1 << 4;
+        const IS_BOX = 1 << 5;
     }
 }
 
-/*
-/// Definition of a variant -- a struct's fields or an enum variant.
-#[derive(Debug, HashStable, TyEncodable, TyDecodable)]
-pub struct VariantDef {
-    /// `DefId` that identifies the variant itself.
-    /// If this variant belongs to a struct or union, then this is a copy of its `DefId`.
-    pub def_id: DefId,
-    /// `DefId` that identifies the variant's constructor.
-    /// If this variant is a struct variant, then this is `None`.
-    pub ctor: Option<(CtorKind, DefId)>,
-    /// Variant or struct name, maybe empty for anonymous adt (struct or union).
-    pub name: Symbol,
-    /// Discriminant of this variant.
-    pub discr: VariantDiscr,
-    /// Fields of this variant.
-    pub fields: IndexVec<FieldIdx, FieldDef>,
-    /// The error guarantees from parser, if any.
-    tainted: Option<ErrorGuaranteed>,
-    /// Flags of the variant (e.g. is field list non-exhaustive)?
-    flags: VariantFlags,
-}
-*/
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct AdtFlags {
-    is_enum: bool,
-    is_union: bool,
-    is_struct: bool,
-    is_phantom_data: bool,
-    is_fundamental: bool,
-    is_box: bool,
-    is_manually_drop: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AdtDefInner {
+    Struct { id: StructId, flags: AdtFlags },
+    Union { id: UnionId, flags: AdtFlags },
+    Enum { id: EnumId, flags: AdtFlags },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdtDefInner {
-    pub id: AdtId,
-    variants: Vec<(VariantIdx, VariantDef)>,
-    flags: AdtFlags,
-    repr: ReprOptions,
-}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdtDef(AdtDefInner);
 
-// We're gonna cheat a little bit and implement `Hash` on only the `DefId` and
-// accept there might be collisions for def ids from different crates (or across
-// different tests, oh my).
-impl std::hash::Hash for AdtDefInner {
-    #[inline]
-    fn hash<H: std::hash::Hasher>(&self, s: &mut H) {
-        self.id.hash(s)
-    }
-}
-
-#[salsa::interned(no_lifetime, constructor = new_)]
-pub struct AdtDef {
-    #[returns(ref)]
-    data_: AdtDefInner,
-}
+const _: () = assert!(size_of::<AdtDef>() == 12);
 
 impl AdtDef {
     pub fn new<'db>(def_id: AdtId, interner: DbInterner<'db>) -> Self {
         let db = interner.db();
-        let (flags, variants, repr) = match def_id {
-            AdtId::StructId(struct_id) => {
-                let data = StructSignature::of(db, struct_id);
-
-                let flags = AdtFlags {
-                    is_enum: false,
-                    is_union: false,
-                    is_struct: true,
-                    is_phantom_data: data.flags.contains(StructFlags::IS_PHANTOM_DATA),
-                    is_fundamental: data.flags.contains(StructFlags::FUNDAMENTAL),
-                    is_box: data.flags.contains(StructFlags::IS_BOX),
-                    is_manually_drop: data.flags.contains(StructFlags::IS_MANUALLY_DROP),
-                };
-
-                let variants = vec![(VariantIdx(0), VariantDef::Struct(struct_id))];
-
-                let data_repr = data.repr(db, struct_id);
-                let mut repr_flags = ReprFlags::empty();
-                if flags.is_box {
-                    repr_flags.insert(ReprFlags::IS_LINEAR);
+        let inner = match def_id {
+            AdtId::StructId(id) => {
+                let data = StructSignature::of(db, id);
+                let mut flags = AdtFlags::empty();
+                if data.flags.contains(StructFlags::FUNDAMENTAL) {
+                    flags.insert(AdtFlags::IS_FUNDAMENTAL);
                 }
-                if data_repr.is_some_and(|r| r.c()) {
-                    repr_flags.insert(ReprFlags::IS_C);
+                if data.flags.contains(StructFlags::IS_PHANTOM_DATA) {
+                    flags.insert(AdtFlags::IS_PHANTOM_DATA);
                 }
-                if data_repr.is_some_and(|r| r.simd()) {
-                    repr_flags.insert(ReprFlags::IS_SIMD);
+                if data.flags.contains(StructFlags::IS_MANUALLY_DROP) {
+                    flags.insert(AdtFlags::IS_MANUALLY_DROP);
                 }
-                let repr = ReprOptions {
-                    align: data_repr.and_then(|r| r.align),
-                    pack: data_repr.and_then(|r| r.pack),
-                    int: data_repr.and_then(|r| r.int),
-                    flags: repr_flags,
-                    ..ReprOptions::default()
-                };
-
-                (flags, variants, repr)
+                if data.flags.contains(StructFlags::IS_BOX) {
+                    flags.insert(AdtFlags::IS_BOX);
+                }
+                if data.flags.contains(StructFlags::HAS_REPR) {
+                    flags.insert(AdtFlags::HAS_REPR);
+                    if data.repr(db, id).is_some_and(|repr| repr.packed()) {
+                        flags.insert(AdtFlags::IS_PACKED);
+                    }
+                }
+                AdtDefInner::Struct { id, flags }
             }
-            AdtId::UnionId(union_id) => {
-                let flags = AdtFlags {
-                    is_enum: false,
-                    is_union: true,
-                    is_struct: false,
-                    is_phantom_data: false,
-                    is_fundamental: false,
-                    is_box: false,
-                    is_manually_drop: false,
-                };
-
-                let variants = vec![(VariantIdx(0), VariantDef::Union(union_id))];
-
-                let data_repr = AttrFlags::repr(db, union_id.into());
-                let mut repr_flags = ReprFlags::empty();
-                if flags.is_box {
-                    repr_flags.insert(ReprFlags::IS_LINEAR);
+            AdtId::UnionId(id) => {
+                let data = UnionSignature::of(db, id);
+                let mut flags = AdtFlags::empty();
+                if data.flags.contains(StructFlags::FUNDAMENTAL) {
+                    flags.insert(AdtFlags::IS_FUNDAMENTAL);
                 }
-                if data_repr.is_some_and(|r| r.c()) {
-                    repr_flags.insert(ReprFlags::IS_C);
+                if data.flags.contains(StructFlags::HAS_REPR) {
+                    flags.insert(AdtFlags::HAS_REPR);
+                    if data.repr(db, id).is_some_and(|repr| repr.packed()) {
+                        flags.insert(AdtFlags::IS_PACKED);
+                    }
                 }
-                if data_repr.is_some_and(|r| r.simd()) {
-                    repr_flags.insert(ReprFlags::IS_SIMD);
-                }
-                let repr = ReprOptions {
-                    align: data_repr.and_then(|r| r.align),
-                    pack: data_repr.and_then(|r| r.pack),
-                    int: data_repr.and_then(|r| r.int),
-                    flags: repr_flags,
-                    ..ReprOptions::default()
-                };
-
-                (flags, variants, repr)
+                AdtDefInner::Union { id, flags }
             }
-            AdtId::EnumId(enum_id) => {
-                let flags = AdtFlags {
-                    is_enum: true,
-                    is_union: false,
-                    is_struct: false,
-                    is_phantom_data: false,
-                    is_fundamental: false,
-                    is_box: false,
-                    is_manually_drop: false,
-                };
-
-                let variants = enum_id
-                    .enum_variants(db)
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, v)| (VariantIdx(idx), v))
-                    .map(|(idx, v)| (idx, VariantDef::Enum(v.0)))
-                    .collect();
-
-                let data_repr = AttrFlags::repr(db, enum_id.into());
-
-                let mut repr_flags = ReprFlags::empty();
-                if flags.is_box {
-                    repr_flags.insert(ReprFlags::IS_LINEAR);
+            AdtId::EnumId(id) => {
+                let data = EnumSignature::of(db, id);
+                let mut flags = AdtFlags::empty();
+                if data.flags.contains(EnumFlags::FUNDAMENTAL) {
+                    flags.insert(AdtFlags::IS_FUNDAMENTAL);
                 }
-                if data_repr.is_some_and(|r| r.c()) {
-                    repr_flags.insert(ReprFlags::IS_C);
+                if data.flags.contains(EnumFlags::HAS_REPR) {
+                    flags.insert(AdtFlags::HAS_REPR);
+                    if data.repr(db, id).is_some_and(|repr| repr.packed()) {
+                        flags.insert(AdtFlags::IS_PACKED);
+                    }
                 }
-                if data_repr.is_some_and(|r| r.simd()) {
-                    repr_flags.insert(ReprFlags::IS_SIMD);
-                }
-
-                let repr = ReprOptions {
-                    align: data_repr.and_then(|r| r.align),
-                    pack: data_repr.and_then(|r| r.pack),
-                    int: data_repr.and_then(|r| r.int),
-                    flags: repr_flags,
-                    ..ReprOptions::default()
-                };
-
-                (flags, variants, repr)
+                AdtDefInner::Enum { id, flags }
             }
         };
-
-        AdtDef::new_(db, AdtDefInner { id: def_id, variants, flags, repr })
-    }
-
-    pub fn inner(&self) -> &AdtDefInner {
-        crate::with_attached_db(|db| {
-            let inner = self.data_(db);
-            // SAFETY: ¯\_(ツ)_/¯
-            unsafe { std::mem::transmute(inner) }
-        })
-    }
-
-    pub fn is_enum(&self) -> bool {
-        self.inner().flags.is_enum
-    }
-
-    pub fn is_box(&self) -> bool {
-        self.inner().flags.is_box
+        AdtDef(inner)
     }
 
     #[inline]
-    pub fn repr(self) -> ReprOptions {
-        self.inner().repr
+    pub fn def_id(self) -> AdtId {
+        match self.0 {
+            AdtDefInner::Struct { id, .. } => AdtId::StructId(id),
+            AdtDefInner::Union { id, .. } => AdtId::UnionId(id),
+            AdtDefInner::Enum { id, .. } => AdtId::EnumId(id),
+        }
     }
 
-    /// Asserts this is a struct or union and returns its unique variant.
-    pub fn non_enum_variant(self) -> VariantDef {
-        assert!(self.inner().flags.is_struct || self.inner().flags.is_union);
-        self.inner().variants[0].1.clone()
+    #[inline]
+    fn flags(self) -> AdtFlags {
+        match self.0 {
+            AdtDefInner::Struct { flags, .. }
+            | AdtDefInner::Union { flags, .. }
+            | AdtDefInner::Enum { flags, .. } => flags,
+        }
+    }
+
+    #[inline]
+    pub fn is_struct(self) -> bool {
+        matches!(self.0, AdtDefInner::Struct { .. })
+    }
+
+    #[inline]
+    pub fn is_union(self) -> bool {
+        matches!(self.0, AdtDefInner::Union { .. })
+    }
+
+    #[inline]
+    pub fn is_enum(self) -> bool {
+        matches!(self.0, AdtDefInner::Enum { .. })
+    }
+
+    #[inline]
+    pub fn is_box(self) -> bool {
+        matches!(self.0, AdtDefInner::Struct { flags, .. } if flags.contains(AdtFlags::IS_BOX))
+    }
+
+    #[inline]
+    pub fn repr(self, db: &dyn HirDatabase) -> ReprOptions {
+        if self.flags().contains(AdtFlags::HAS_REPR) {
+            AttrFlags::repr_assume_has(db, self.def_id()).unwrap_or_default()
+        } else {
+            ReprOptions::default()
+        }
     }
 }
 
 impl<'db> inherent::AdtDef<DbInterner<'db>> for AdtDef {
     fn def_id(self) -> AdtIdWrapper {
-        self.inner().id.into()
+        self.def_id().into()
     }
 
     fn is_struct(self) -> bool {
-        self.inner().flags.is_struct
+        self.is_struct()
     }
 
     fn is_phantom_data(self) -> bool {
-        self.inner().flags.is_phantom_data
+        matches!(self.0, AdtDefInner::Struct { flags, .. } if flags.contains(AdtFlags::IS_PHANTOM_DATA))
+    }
+
+    fn is_manually_drop(self) -> bool {
+        matches!(self.0, AdtDefInner::Struct { flags, .. } if flags.contains(AdtFlags::IS_MANUALLY_DROP))
+    }
+
+    fn is_packed(self) -> bool {
+        self.flags().contains(AdtFlags::IS_PACKED)
     }
 
     fn is_fundamental(self) -> bool {
-        self.inner().flags.is_fundamental
+        self.flags().contains(AdtFlags::IS_FUNDAMENTAL)
     }
 
     fn struct_tail_ty(
         self,
         interner: DbInterner<'db>,
     ) -> Option<EarlyBinder<DbInterner<'db>, Ty<'db>>> {
-        let hir_def::AdtId::StructId(struct_id) = self.inner().id else {
+        let hir_def::AdtId::StructId(struct_id) = self.def_id() else {
             return None;
         };
         let id: VariantId = struct_id.into();
@@ -696,7 +597,7 @@ impl<'db> inherent::AdtDef<DbInterner<'db>> for AdtDef {
             db.field_types(id).iter().map(|(_, ty)| ty.get().skip_binder()).collect::<Vec<_>>()
         };
         let field_tys = |_id: VariantId| vec![];
-        let tys: Vec<_> = match self.inner().id {
+        let tys: Vec<_> = match self.def_id() {
             hir_def::AdtId::StructId(id) => field_tys(id.into()),
             hir_def::AdtId::UnionId(id) => field_tys(id.into()),
             hir_def::AdtId::EnumId(id) => id
@@ -721,20 +622,8 @@ impl<'db> inherent::AdtDef<DbInterner<'db>> for AdtDef {
             .transpose()
     }
 
-    fn destructor(
-        self,
-        _interner: DbInterner<'db>,
-    ) -> Option<rustc_type_ir::solve::AdtDestructorKind> {
-        // FIXME(next-solver)
-        None
-    }
-
-    fn is_manually_drop(self) -> bool {
-        self.inner().flags.is_manually_drop
-    }
-
-    fn is_packed(self) -> bool {
-        self.repr().packed()
+    fn destructor(self, interner: DbInterner<'db>) -> Option<AdtDestructorKind> {
+        crate::drop::destructor(interner.db, self.def_id()).map(|_| AdtDestructorKind::NotConst)
     }
 
     fn field_representing_type_info(
@@ -749,17 +638,17 @@ impl<'db> inherent::AdtDef<DbInterner<'db>> for AdtDef {
 
 impl fmt::Debug for AdtDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        crate::with_attached_db(|db| match self.inner().id {
-            AdtId::StructId(struct_id) => {
-                let data = StructSignature::of(db, struct_id);
+        crate::with_attached_db(|db| match self.0 {
+            AdtDefInner::Struct { id, .. } => {
+                let data = StructSignature::of(db, id);
                 f.write_str(data.name.as_str())
             }
-            AdtId::UnionId(union_id) => {
-                let data = UnionSignature::of(db, union_id);
+            AdtDefInner::Union { id, .. } => {
+                let data = UnionSignature::of(db, id);
                 f.write_str(data.name.as_str())
             }
-            AdtId::EnumId(enum_id) => {
-                let data = EnumSignature::of(db, enum_id);
+            AdtDefInner::Enum { id, .. } => {
+                let data = EnumSignature::of(db, id);
                 f.write_str(data.name.as_str())
             }
         })
@@ -1120,7 +1009,8 @@ impl<'db> Interner for DbInterner<'db> {
         self,
         f: impl FnOnce(&mut rustc_type_ir::search_graph::GlobalCache<Self>) -> R,
     ) -> R {
-        tls_cache::with_cache(self.db, f)
+        // We make sure to reinit the cache when constructing the Interner.
+        tls_cache::borrow_assume_valid(self.db, f)
     }
 
     fn canonical_param_env_cache_get_or_insert<R>(
@@ -1272,13 +1162,13 @@ impl<'db> Interner for DbInterner<'db> {
             SolverDefId::TypeAliasId(it) => it.lookup(self.db()).container,
             SolverDefId::ConstId(it) => it.lookup(self.db()).container,
             SolverDefId::InternedClosureId(it) => {
-                return it.loc(self.db).0.generic_def(self.db()).into();
+                return it.loc(self.db).owner.generic_def(self.db()).into();
             }
             SolverDefId::InternedCoroutineId(it) => {
-                return it.loc(self.db).0.generic_def(self.db()).into();
+                return it.loc(self.db).owner.generic_def(self.db()).into();
             }
             SolverDefId::InternedCoroutineClosureId(it) => {
-                return it.loc(self.db).0.generic_def(self.db()).into();
+                return it.loc(self.db).owner.generic_def(self.db()).into();
             }
             SolverDefId::StaticId(_)
             | SolverDefId::AdtId(_)
@@ -1314,28 +1204,35 @@ impl<'db> Interner for DbInterner<'db> {
     }
 
     fn coroutine_movability(self, def_id: Self::CoroutineId) -> rustc_ast_ir::Movability {
-        // FIXME: Make this a query? I don't believe this can be accessed from bodies other than
-        // the current infer query, except with revealed opaques - is it rare enough to not matter?
-        let InternedClosure(owner, expr_id) = def_id.0.loc(self.db);
-        let store = ExpressionStore::of(self.db, owner);
-        let expr = &store[expr_id];
-        match *expr {
-            hir_def::hir::Expr::Closure { closure_kind, .. } => match closure_kind {
-                hir_def::hir::ClosureKind::Coroutine(movability) => match movability {
-                    hir_def::hir::Movability::Static => rustc_ast_ir::Movability::Static,
-                    hir_def::hir::Movability::Movable => rustc_ast_ir::Movability::Movable,
-                },
-                hir_def::hir::ClosureKind::AsyncBlock { .. } => rustc_ast_ir::Movability::Static,
-                _ => panic!("unexpected expression for a coroutine: {expr:?}"),
+        match def_id.0.loc(self.db).kind {
+            hir_def::hir::ClosureKind::OldCoroutine(movability) => match movability {
+                hir_def::hir::Movability::Static => rustc_ast_ir::Movability::Static,
+                hir_def::hir::Movability::Movable => rustc_ast_ir::Movability::Movable,
             },
-            _ => panic!("unexpected expression for a coroutine: {expr:?}"),
+            hir_def::hir::ClosureKind::Coroutine { .. } => rustc_ast_ir::Movability::Static,
+            kind => panic!("unexpected kind for a coroutine: {kind:?}"),
         }
     }
 
     fn coroutine_for_closure(self, def_id: Self::CoroutineClosureId) -> Self::CoroutineId {
-        let InternedClosure(owner, coroutine_closure_expr) = def_id.0.loc(self.db);
+        let InternedClosure { owner, expr: coroutine_closure_expr, kind: coroutine_closure_kind } =
+            def_id.0.loc(self.db);
+        let coroutine_closure_kind = match coroutine_closure_kind {
+            HirClosureKind::CoroutineClosure(it) => it,
+            _ => {
+                panic!("invalid kind closure kind {coroutine_closure_kind:?} for coroutine closure")
+            }
+        };
         let coroutine_expr = ExpressionStore::coroutine_for_closure(coroutine_closure_expr);
-        InternedCoroutineId::new(self.db, InternedClosure(owner, coroutine_expr)).into()
+        let coroutine_kind = hir_def::hir::ClosureKind::Coroutine {
+            kind: coroutine_closure_kind,
+            source: hir_def::hir::CoroutineSource::Closure,
+        };
+        InternedCoroutineId::new(
+            self.db,
+            InternedClosure { owner, expr: coroutine_expr, kind: coroutine_kind },
+        )
+        .into()
     }
 
     fn generics_require_sized_self(self, def_id: Self::DefId) -> bool {
@@ -1487,7 +1384,7 @@ impl<'db> Interner for DbInterner<'db> {
     fn require_lang_item(self, lang_item: SolverLangItem) -> Self::DefId {
         let lang_items = self.lang_items();
         let lang_item = match lang_item {
-            SolverLangItem::AsyncFnKindUpvars => unimplemented!(),
+            SolverLangItem::AsyncFnKindUpvars => lang_items.AsyncFnKindUpvars,
             SolverLangItem::AsyncFnOnceOutput => lang_items.AsyncFnOnceOutput,
             SolverLangItem::CallOnceFuture => lang_items.CallOnceFuture,
             SolverLangItem::CallRefFuture => lang_items.CallRefFuture,
@@ -1498,8 +1395,8 @@ impl<'db> Interner for DbInterner<'db> {
             SolverLangItem::DynMetadata => {
                 return lang_items.DynMetadata.expect("Lang item required but not found.").into();
             }
-            SolverLangItem::FieldBase => unimplemented!(),
-            SolverLangItem::FieldType => unimplemented!(),
+            SolverLangItem::FieldBase => lang_items.FieldBase,
+            SolverLangItem::FieldType => lang_items.FieldType,
         };
         lang_item.expect("Lang item required but not found.").into()
     }
@@ -1508,13 +1405,13 @@ impl<'db> Interner for DbInterner<'db> {
         let lang_items = self.lang_items();
         let lang_item = match lang_item {
             SolverTraitLangItem::AsyncFn => lang_items.AsyncFn,
-            SolverTraitLangItem::AsyncFnKindHelper => unimplemented!(),
+            SolverTraitLangItem::AsyncFnKindHelper => lang_items.AsyncFnKindHelper,
             SolverTraitLangItem::AsyncFnMut => lang_items.AsyncFnMut,
             SolverTraitLangItem::AsyncFnOnce => lang_items.AsyncFnOnce,
             SolverTraitLangItem::AsyncFnOnceOutput => unimplemented!(
                 "This is incorrectly marked as `SolverTraitLangItem`, and is not used by the solver."
             ),
-            SolverTraitLangItem::AsyncIterator => unimplemented!(),
+            SolverTraitLangItem::AsyncIterator => lang_items.AsyncIterator,
             SolverTraitLangItem::Clone => lang_items.Clone,
             SolverTraitLangItem::Copy => lang_items.Copy,
             SolverTraitLangItem::Coroutine => lang_items.Coroutine,
@@ -1525,7 +1422,7 @@ impl<'db> Interner for DbInterner<'db> {
             SolverTraitLangItem::FnMut => lang_items.FnMut,
             SolverTraitLangItem::FnOnce => lang_items.FnOnce,
             SolverTraitLangItem::FnPtrTrait => lang_items.FnPtrTrait,
-            SolverTraitLangItem::FusedIterator => unimplemented!(),
+            SolverTraitLangItem::FusedIterator => lang_items.FusedIterator,
             SolverTraitLangItem::Future => lang_items.Future,
             SolverTraitLangItem::Iterator => lang_items.Iterator,
             SolverTraitLangItem::PointeeTrait => lang_items.PointeeTrait,
@@ -1536,11 +1433,9 @@ impl<'db> Interner for DbInterner<'db> {
             SolverTraitLangItem::Tuple => lang_items.Tuple,
             SolverTraitLangItem::Unpin => lang_items.Unpin,
             SolverTraitLangItem::Unsize => lang_items.Unsize,
-            SolverTraitLangItem::BikeshedGuaranteedNoDrop => {
-                unimplemented!()
-            }
+            SolverTraitLangItem::BikeshedGuaranteedNoDrop => lang_items.BikeshedGuaranteedNoDrop,
             SolverTraitLangItem::TrivialClone => lang_items.TrivialClone,
-            SolverTraitLangItem::Field => unimplemented!(),
+            SolverTraitLangItem::Field => lang_items.Field,
         };
         lang_item.expect("Lang item required but not found.").into()
     }
@@ -1565,7 +1460,6 @@ impl<'db> Interner for DbInterner<'db> {
 
             ignore = {
                 AsyncFnKindHelper,
-                AsyncIterator,
                 BikeshedGuaranteedNoDrop,
                 FusedIterator,
                 Field,
@@ -1592,6 +1486,7 @@ impl<'db> Interner for DbInterner<'db> {
             Unpin,
             Tuple,
             Iterator,
+            AsyncIterator,
             AsyncFn,
             AsyncFnMut,
             AsyncFnOnce,
@@ -1657,7 +1552,6 @@ impl<'db> Interner for DbInterner<'db> {
 
             ignore = {
                 AsyncFnKindHelper,
-                AsyncIterator,
                 BikeshedGuaranteedNoDrop,
                 FusedIterator,
                 Field,
@@ -1684,6 +1578,7 @@ impl<'db> Interner for DbInterner<'db> {
             Unpin,
             Tuple,
             Iterator,
+            AsyncIterator,
             AsyncFn,
             AsyncFnMut,
             AsyncFnOnce,
@@ -1941,41 +1836,28 @@ impl<'db> Interner for DbInterner<'db> {
     }
 
     fn is_general_coroutine(self, def_id: Self::CoroutineId) -> bool {
-        // FIXME: Make this a query? I don't believe this can be accessed from bodies other than
-        // the current infer query, except with revealed opaques - is it rare enough to not matter?
-        let InternedClosure(owner, expr_id) = def_id.0.loc(self.db);
-        let store = ExpressionStore::of(self.db, owner);
-        matches!(
-            store[expr_id],
-            hir_def::hir::Expr::Closure {
-                closure_kind: hir_def::hir::ClosureKind::Coroutine(_),
-                ..
-            }
-        )
+        matches!(def_id.0.loc(self.db).kind, HirClosureKind::OldCoroutine(_))
     }
 
     fn coroutine_is_async(self, def_id: Self::CoroutineId) -> bool {
-        // FIXME: Make this a query? I don't believe this can be accessed from bodies other than
-        // the current infer query, except with revealed opaques - is it rare enough to not matter?
-        let InternedClosure(owner, expr_id) = def_id.0.loc(self.db);
-        let store = ExpressionStore::of(self.db, owner);
         matches!(
-            store[expr_id],
-            hir_def::hir::Expr::Closure {
-                closure_kind: hir_def::hir::ClosureKind::AsyncBlock { .. },
-                ..
-            }
+            def_id.0.loc(self.db).kind,
+            HirClosureKind::Coroutine { kind: HirCoroutineKind::Async, .. }
         )
     }
 
-    fn coroutine_is_gen(self, _coroutine_def_id: Self::CoroutineId) -> bool {
-        // We don't handle gen coroutines yet.
-        false
+    fn coroutine_is_gen(self, def_id: Self::CoroutineId) -> bool {
+        matches!(
+            def_id.0.loc(self.db).kind,
+            HirClosureKind::Coroutine { kind: HirCoroutineKind::Gen, .. }
+        )
     }
 
-    fn coroutine_is_async_gen(self, _coroutine_def_id: Self::CoroutineId) -> bool {
-        // We don't handle gen coroutines yet.
-        false
+    fn coroutine_is_async_gen(self, def_id: Self::CoroutineId) -> bool {
+        matches!(
+            def_id.0.loc(self.db).kind,
+            HirClosureKind::Coroutine { kind: HirCoroutineKind::AsyncGen, .. }
+        )
     }
 
     fn unsizing_params_for_adt(self, id: Self::AdtId) -> Self::UnsizingParams {
@@ -1995,13 +1877,18 @@ impl<'db> Interner for DbInterner<'db> {
         };
 
         // The last field of the structure has to exist and contain type/const parameters.
-        let variant = def.non_enum_variant();
+        let variant = match def.def_id() {
+            AdtId::StructId(id) => VariantId::from(id),
+            AdtId::UnionId(id) => id.into(),
+            AdtId::EnumId(_) => panic!("expected a struct or a union"),
+        };
         let fields = variant.fields(self.db());
-        let Some((tail_field, prefix_fields)) = fields.split_last() else {
+        let mut prefix_fields = fields.fields().iter();
+        let Some(tail_field) = prefix_fields.next_back() else {
             return UnsizingParams(DenseBitSet::new_empty(num_params));
         };
 
-        let field_types = self.db().field_types(variant.id());
+        let field_types = self.db().field_types(variant);
         let mut unsizing_params = DenseBitSet::new_empty(num_params);
         let ty = field_types[tail_field.0].get();
         for arg in ty.instantiate_identity().walk() {
@@ -2086,17 +1973,20 @@ impl<'db> Interner for DbInterner<'db> {
         // Collect coroutines.
         let body = Body::of(self.db, def_id);
         body.exprs().for_each(|(expr_id, expr)| {
-            if matches!(
-                expr,
-                hir_def::hir::Expr::Closure {
-                    closure_kind: hir_def::hir::ClosureKind::AsyncBlock { .. }
-                        | hir_def::hir::ClosureKind::Coroutine(_),
-                    ..
-                }
-            ) {
+            if let hir_def::hir::Expr::Closure {
+                closure_kind:
+                    kind @ (hir_def::hir::ClosureKind::Coroutine { .. }
+                    | hir_def::hir::ClosureKind::OldCoroutine(_)),
+                ..
+            } = *expr
+            {
                 let coroutine = InternedCoroutineId::new(
                     self.db,
-                    InternedClosure(ExpressionStoreOwnerId::Body(def_id), expr_id),
+                    InternedClosure {
+                        owner: ExpressionStoreOwnerId::Body(def_id),
+                        expr: expr_id,
+                        kind,
+                    },
                 );
                 result.push(coroutine.into());
             }
@@ -2355,6 +2245,22 @@ impl<'db> DbInterner<'db> {
             abi,
         }
     }
+
+    /// `mk_fn_sig`, but with a safe Rust ABI, and no C-variadic argument.
+    pub fn mk_fn_sig_safe_rust_abi<I>(self, inputs: I, output: Ty<'db>) -> FnSig<'db>
+    where
+        I: IntoIterator<Item = Ty<'db>>,
+    {
+        FnSig {
+            inputs_and_output: Tys::new_from_iter(
+                self,
+                inputs.into_iter().chain(std::iter::once(output)),
+            ),
+            c_variadic: false,
+            safety: Safety::Safe,
+            abi: FnAbi::Rust,
+        }
+    }
 }
 
 fn predicates_of(db: &dyn HirDatabase, def_id: SolverDefId) -> &GenericPredicates {
@@ -2475,6 +2381,7 @@ mod tls_db {
             }
 
             let _guard = DbGuard::new(self, db);
+            super::tls_cache::reinit_cache(db);
             op()
         }
 
@@ -2497,10 +2404,14 @@ mod tls_db {
                 #[inline]
                 fn drop(&mut self) {
                     self.state.database.set(self.prev);
+                    if let Some(prev) = self.prev {
+                        super::tls_cache::reinit_cache(unsafe { prev.as_ref() });
+                    }
                 }
             }
 
             let _guard = DbGuard::new(self, db);
+            super::tls_cache::reinit_cache(db);
             op()
         }
 
@@ -2555,22 +2466,38 @@ mod tls_cache {
         static GLOBAL_CACHE: RefCell<Option<Cache>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn with_cache<'db, T>(
-        db: &'db dyn HirDatabase,
-        f: impl FnOnce(&mut GlobalCache<DbInterner<'db>>) -> T,
-    ) -> T {
+    pub(super) fn reinit_cache(db: &dyn HirDatabase) {
         GLOBAL_CACHE.with_borrow_mut(|handle| {
             let (db_nonce, revision) = db.nonce_and_revision();
-            let handle = match handle {
+            match handle {
                 Some(handle) => {
                     if handle.revision != revision || db_nonce != handle.db_nonce {
                         *handle = Cache { cache: GlobalCache::default(), revision, db_nonce };
                     }
-                    handle
                 }
-                None => handle.insert(Cache { cache: GlobalCache::default(), revision, db_nonce }),
-            };
+                None => *handle = Some(Cache { cache: GlobalCache::default(), revision, db_nonce }),
+            }
+        })
+    }
 
+    pub(super) fn borrow_assume_valid<'db, T>(
+        db: &'db dyn HirDatabase,
+        f: impl FnOnce(&mut GlobalCache<DbInterner<'db>>) -> T,
+    ) -> T {
+        if cfg!(debug_assertions) {
+            let get_state = || {
+                GLOBAL_CACHE.with_borrow(|handle| {
+                    handle.as_ref().map(|handle| (handle.db_nonce, handle.revision))
+                })
+            };
+            let old_state = get_state();
+            reinit_cache(db);
+            let new_state = get_state();
+            assert_eq!(old_state, new_state, "you assumed the cache is valid!");
+        }
+
+        GLOBAL_CACHE.with_borrow_mut(|handle| {
+            let handle = handle.as_mut().expect("you assumed the cache is valid!");
             // SAFETY: No idea
             f(unsafe {
                 std::mem::transmute::<

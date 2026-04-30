@@ -15,7 +15,7 @@ use rustc_type_ir::{
     InferTy, TypeVisitableExt, Upcast, Variance,
     elaborate::{self, supertrait_def_ids},
     fast_reject::{DeepRejectCtxt, TreatParams, simplify_type},
-    inherent::{AdtDef as _, BoundExistentialPredicates as _, IntoKind, Ty as _},
+    inherent::{BoundExistentialPredicates as _, IntoKind, Ty as _},
 };
 use smallvec::{SmallVec, smallvec};
 use tracing::{debug, instrument};
@@ -284,7 +284,8 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                 // special handling for this "trivial case" is a good idea.
 
                 let infcx = self.infcx;
-                let (self_ty, var_values) = infcx.instantiate_canonical(&query_input);
+                let (self_ty, var_values) =
+                    infcx.instantiate_canonical(self.call_span, &query_input);
                 debug!(?self_ty, ?query_input, "probe_op: Mode::Path");
                 let prev_opaque_entries =
                     self.infcx.inner.borrow_mut().opaque_types().num_entries();
@@ -315,7 +316,7 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
         // ambiguous.
         if let Some(bad_ty) = &steps.opt_bad_ty {
             if bad_ty.reached_raw_pointer
-                && !self.unstable_features.arbitrary_self_types_pointers
+                && !self.features.arbitrary_self_types_pointers
                 && self.edition.at_least_2018()
             {
                 // this case used to be allowed by the compiler,
@@ -380,7 +381,8 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
             // chain to support recursive calls. We do error if the final
             // infer var is not an opaque.
             let infcx = self.infcx;
-            let (self_ty, inference_vars) = infcx.instantiate_canonical(self_ty);
+            let (self_ty, inference_vars) =
+                infcx.instantiate_canonical(self.receiver_span, self_ty);
             let prev_opaque_entries = infcx.inner.borrow_mut().opaque_types().num_entries();
 
             let self_ty_is_opaque = |ty: Ty<'_>| {
@@ -404,8 +406,8 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                 Autoderef::new(infcx, self.param_env, self_ty).include_raw_pointers();
 
             let mut reached_raw_pointer = false;
-            let arbitrary_self_types_enabled = self.unstable_features.arbitrary_self_types
-                || self.unstable_features.arbitrary_self_types_pointers;
+            let arbitrary_self_types_enabled =
+                self.features.arbitrary_self_types || self.features.arbitrary_self_types_pointers;
             let (mut steps, reached_recursion_limit) = if arbitrary_self_types_enabled {
                 let reachable_via_deref =
                     autoderef_via_deref.by_ref().map(|_| true).chain(std::iter::repeat(false));
@@ -613,7 +615,7 @@ impl<'db> ProbeChoice<'db> for ProbeForNameChoice<'db> {
             // We collapse to a subtrait pick *after* filtering unstable candidates
             // to make sure we don't prefer a unstable subtrait method over a stable
             // supertrait method.
-            if this.ctx.unstable_features.supertrait_item_shadowing
+            if this.ctx.features.supertrait_item_shadowing
                 && let Some(pick) =
                     this.collapse_candidates_to_subtrait_pick(self_ty, &applicable_candidates)
             {
@@ -921,7 +923,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                     // will still match the original object type, but it won't pollute our
                     // type variables in any form, so just do that!
                     let (QueryResponse { value: generalized_self_ty, .. }, _ignored_var_values) =
-                        self.infcx().instantiate_canonical(self_ty);
+                        self.infcx().instantiate_canonical(self.ctx.call_span, self_ty);
 
                     self.assemble_inherent_candidates_from_object(generalized_self_ty);
                     self.assemble_inherent_impl_candidates_for_type(
@@ -935,7 +937,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                 }
             }
             TyKind::Adt(def, _) => {
-                let def_id = def.def_id().0;
+                let def_id = def.def_id();
                 self.assemble_inherent_impl_candidates_for_type(
                     &SimplifiedType::Adt(def_id.into()),
                     receiver_steps,
@@ -1117,7 +1119,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
 
     #[instrument(level = "debug", skip(self))]
     fn assemble_extension_candidates_for_trait(&mut self, trait_def_id: TraitId) {
-        let trait_args = self.infcx().fresh_args_for_item(trait_def_id.into());
+        let trait_args = self.infcx().fresh_args_for_item(self.ctx.call_span, trait_def_id.into());
         let trait_ref = TraitRef::new_from_args(self.interner(), trait_def_id.into(), trait_args);
 
         self.with_trait_item(trait_def_id, |this, item| {
@@ -1183,8 +1185,8 @@ impl<'a, 'db> ProbeContext<'a, 'db, ProbeForNameChoice<'db>> {
         // The errors emitted by this function are part of
         // the arbitrary self types work, and should not impact
         // other users.
-        if !self.ctx.unstable_features.arbitrary_self_types
-            && !self.ctx.unstable_features.arbitrary_self_types_pointers
+        if !self.ctx.features.arbitrary_self_types
+            && !self.ctx.features.arbitrary_self_types_pointers
         {
             return Ok(());
         }
@@ -1510,6 +1512,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
             }
             TraitCandidate(trait_ref) => self.infcx().probe(|_| {
                 let trait_ref = self.infcx().instantiate_binder_with_fresh_vars(
+                    self.ctx.call_span,
                     BoundRegionConversionTime::FnCall,
                     trait_ref,
                 );
@@ -1574,7 +1577,8 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
 
             match probe.kind {
                 InherentImplCandidate { impl_def_id, .. } => {
-                    let impl_args = self.infcx().fresh_args_for_item(impl_def_id.into());
+                    let impl_args =
+                        self.infcx().fresh_args_for_item(self.ctx.call_span, impl_def_id.into());
                     let impl_ty =
                         self.db().impl_self_ty(impl_def_id).instantiate(self.interner(), impl_args);
                     (xform_self_ty, xform_ret_ty) =
@@ -1632,6 +1636,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                     }
 
                     let trait_ref = self.infcx().instantiate_binder_with_fresh_vars(
+                        self.ctx.call_span,
                         BoundRegionConversionTime::FnCall,
                         poly_trait_ref,
                     );
@@ -1667,6 +1672,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                 }
                 ObjectCandidate(poly_trait_ref) | WhereClauseCandidate(poly_trait_ref) => {
                     let trait_ref = self.infcx().instantiate_binder_with_fresh_vars(
+                        self.ctx.call_span,
                         BoundRegionConversionTime::FnCall,
                         poly_trait_ref,
                     );
@@ -2029,8 +2035,12 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                                 // In general, during probe we erase regions.
                                 Region::new_erased(self.interner()).into()
                             }
-                            GenericParamId::TypeParamId(_) => self.infcx().next_ty_var().into(),
-                            GenericParamId::ConstParamId(_) => self.infcx().next_const_var().into(),
+                            GenericParamId::TypeParamId(_) => {
+                                self.infcx().next_ty_var(self.ctx.call_span).into()
+                            }
+                            GenericParamId::ConstParamId(_) => {
+                                self.infcx().next_const_var(self.ctx.call_span).into()
+                            }
                         }
                     }
                 },

@@ -87,7 +87,7 @@ async fn test() {
 fn infer_async_closure() {
     check_types(
         r#"
-//- minicore: future, option
+//- minicore: future, option, async_fn
 async fn test() {
     let f = async move |x: i32| x + 42;
     f;
@@ -118,6 +118,25 @@ async fn test() {
     let _: Option<u64> = c().await;
     c;
 //  ^ impl AsyncFn() -> Option<u64>
+}
+"#,
+    );
+}
+
+#[test]
+fn infer_async_gen_closure() {
+    check(
+        r#"
+//- minicore: async_iterator, fn, add, builtin_impls
+//- /main.rs edition:2024
+fn test() {
+    let f = async gen move |x: i32| {
+        yield x + 42;
+            //^^^^^^ expected Poll<Option<{unknown}>>, got i32
+    };
+    let a = f(4);
+    a;
+//  ^ type: impl AsyncIterator<Item = {unknown}>
 }
 "#,
     );
@@ -3149,6 +3168,7 @@ impl<A: Step> core::iter::Iterator for core::ops::Range<A> {
 fn infer_closure_arg() {
     check_infer(
         r#"
+//- minicore: fn
 //- /lib.rs
 
 enum Option<T> {

@@ -190,7 +190,13 @@ pub(crate) fn apply_demorgan(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opti
 // }
 // ```
 pub(crate) fn apply_demorgan_iterator(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    let method_call: ast::MethodCallExpr = ctx.find_node_at_offset()?;
+    let method_call: ast::MethodCallExpr = ctx.find_node_at_offset().or_else(|| {
+        let parent = ctx.find_token_syntax_at_offset(T![!])?.parent()?;
+        match ast::PrefixExpr::cast(parent)?.expr()? {
+            ast::Expr::MethodCallExpr(method_call) => Some(method_call),
+            _ => None,
+        }
+    })?;
     let (name, arg_expr) = validate_method_call_expr(ctx, &method_call)?;
 
     let ast::Expr::ClosureExpr(closure_expr) = arg_expr else { return None };
@@ -210,6 +216,8 @@ pub(crate) fn apply_demorgan_iterator(acc: &mut Assists, ctx: &AssistContext<'_>
             let new_name = match name.text().as_str() {
                 "all" => make.name_ref("any"),
                 "any" => make.name_ref("all"),
+                "is_some_and" => make.name_ref("is_none_or"),
+                "is_none_or" => make.name_ref("is_some_and"),
                 _ => unreachable!(),
             };
             editor.replace(name.syntax(), new_name.syntax());
@@ -249,10 +257,13 @@ fn validate_method_call_expr(
     method_call: &ast::MethodCallExpr,
 ) -> Option<(ast::NameRef, ast::Expr)> {
     let name_ref = method_call.name_ref()?;
+    let arg_expr = method_call.arg_list()?.args().next()?;
+    if name_ref.text() == "is_some_and" || name_ref.text() == "is_none_or" {
+        return Some((name_ref, arg_expr));
+    }
     if name_ref.text() != "all" && name_ref.text() != "any" {
         return None;
     }
-    let arg_expr = method_call.arg_list()?.args().next()?;
 
     let sema = &ctx.sema;
 
@@ -391,6 +402,26 @@ fn f() { if let 1 = 1 &&$0 true { } }
             "fn f() { $0!(1 || 3 && 4 || 5) }",
             "fn f() { !1 && !(3 && 4) && !5 }",
         )
+    }
+
+    #[test]
+    fn demorgan_iterator_on_not() {
+        check_assist(
+            apply_demorgan_iterator,
+            r#"
+//- minicore: iterator
+fn main() {
+    let arr = [1, 2, 3];
+    let cond = $0!arr.into_iter().all(|num| num != 4);
+}
+"#,
+            r#"
+fn main() {
+    let arr = [1, 2, 3];
+    let cond = arr.into_iter().any(|num| num == 4);
+}
+"#,
+        );
     }
 
     #[test]
@@ -636,6 +667,51 @@ fn main() {
 fn main() {
     let arr = [1, 2, 3];
     if !arr.into_iter().$0map(|num| num > 3) {
+        println!("foo");
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn demorgan_option_is_some_and() {
+        check_assist(
+            apply_demorgan_iterator,
+            r#"
+//- minicore: option
+fn main() {
+    let cond = Some(2);
+    if !cond.$0is_some_and(|num| num > 3) {
+        println!("foo");
+    }
+}
+"#,
+            r#"
+fn main() {
+    let cond = Some(2);
+    if cond.is_none_or(|num| num <= 3) {
+        println!("foo");
+    }
+}
+"#,
+        );
+
+        check_assist(
+            apply_demorgan_iterator,
+            r#"
+//- minicore: option
+fn main() {
+    let cond = Some(2);
+    if !cond.$0is_none_or(|num| num > 3) {
+        println!("foo");
+    }
+}
+"#,
+            r#"
+fn main() {
+    let cond = Some(2);
+    if cond.is_some_and(|num| num <= 3) {
         println!("foo");
     }
 }

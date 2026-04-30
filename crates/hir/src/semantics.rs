@@ -17,7 +17,7 @@ use hir_def::{
     TraitId, VariantId,
     attrs::parse_extra_crate_attrs,
     expr_store::{Body, ExprOrPatSource, ExpressionStore, HygieneId, path::Path},
-    hir::{BindingId, Expr, ExprId, ExprOrPatId, Pat},
+    hir::{BindingId, Expr, ExprId, ExprOrPatId},
     nameres::{ModuleOrigin, crate_def_map},
     resolver::{self, HasResolver, Resolver, TypeNs, ValueNs},
     type_ref::Mutability,
@@ -36,20 +36,19 @@ use hir_ty::{
     diagnostics::unsafe_operations,
     infer_query_with_inspect,
     next_solver::{
-        AnyImplId, DbInterner, Span,
+        AnyImplId, DbInterner,
         format_proof_tree::{ProofTreeData, dump_proof_tree_structured},
     },
 };
 use intern::{Interned, Symbol, sym};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustc_type_ir::inherent::Span as _;
 use smallvec::{SmallVec, smallvec};
 use span::{FileId, SyntaxContext};
 use stdx::{TupleExt, always};
 use syntax::{
-    AstNode, AstToken, Direction, SmolStr, SmolStrBuilder, SyntaxElement, SyntaxKind, SyntaxNode,
-    SyntaxNodePtr, SyntaxToken, T, TextRange, TextSize,
+    AstNode, AstPtr, AstToken, Direction, SmolStr, SmolStrBuilder, SyntaxElement, SyntaxKind,
+    SyntaxNode, SyntaxNodePtr, SyntaxToken, T, TextRange, TextSize,
     algo::skip_trivia_token,
     ast::{self, HasAttrs as _, HasGenericParams},
 };
@@ -542,6 +541,10 @@ impl<'db> SemanticsImpl<'db> {
         let node = self.db.parse_or_expand(file_id);
         self.cache(node.clone(), file_id);
         node
+    }
+
+    pub fn to_node<N: AstNode>(&self, ptr: InFile<AstPtr<N>>) -> N {
+        ptr.value.to_node(&self.parse_or_expand(ptr.file_id))
     }
 
     pub fn expand(&self, file_id: MacroCallId) -> ExpandResult<SyntaxNode> {
@@ -1635,6 +1638,44 @@ impl<'db> SemanticsImpl<'db> {
             .kmerge_by(|node1, node2| node1.text_range().len() < node2.text_range().len())
     }
 
+    /// Returns the `return` expressions in this function's body,
+    /// excluding those inside closures or async blocks.
+    pub fn fn_return_points(&self, func: Function) -> Vec<InFile<ast::ReturnExpr>> {
+        let func_id = match func.id {
+            AnyFunctionId::FunctionId(id) => id,
+            _ => return vec![],
+        };
+        let (body, source_map) = Body::with_source_map(self.db, func_id.into());
+
+        fn collect_returns(
+            sema: &SemanticsImpl<'_>,
+            body: &Body,
+            source_map: &hir_def::expr_store::ExpressionStoreSourceMap,
+            expr_id: ExprId,
+            acc: &mut Vec<InFile<ast::ReturnExpr>>,
+        ) {
+            match &body[expr_id] {
+                Expr::Closure { .. } | Expr::Const(_) => return,
+                Expr::Return { .. } => {
+                    if let Ok(source) = source_map.expr_syntax(expr_id)
+                        && let Some(ret_expr) = source.value.cast::<ast::ReturnExpr>()
+                    {
+                        let root = sema.parse_or_expand(source.file_id);
+                        acc.push(InFile::new(source.file_id, ret_expr.to_node(&root)));
+                    }
+                }
+                _ => {}
+            }
+            body.walk_child_exprs(expr_id, |child| {
+                collect_returns(sema, body, source_map, child, acc);
+            });
+        }
+
+        let mut returns = vec![];
+        collect_returns(self, body, source_map, body.root_expr(), &mut returns);
+        returns
+    }
+
     pub fn resolve_lifetime_param(&self, lifetime: &ast::Lifetime) -> Option<LifetimeParam> {
         let text = lifetime.text();
         let lifetime_param = lifetime.syntax().ancestors().find_map(|syn| {
@@ -1693,9 +1734,7 @@ impl<'db> SemanticsImpl<'db> {
                         hir_ty::Adjust::NeverToAny => Adjust::NeverToAny,
                         hir_ty::Adjust::Deref(Some(hir_ty::OverloadedDeref(m))) => {
                             // FIXME: Should we handle unknown mutability better?
-                            Adjust::Deref(Some(OverloadedDeref(
-                                m.map(mutability).unwrap_or(Mutability::Shared),
-                            )))
+                            Adjust::Deref(Some(OverloadedDeref(mutability(m))))
                         }
                         hir_ty::Adjust::Deref(None) => Adjust::Deref(None),
                         hir_ty::Adjust::Borrow(hir_ty::AutoBorrow::RawPtr(m)) => {
@@ -2373,13 +2412,7 @@ impl<'db> SemanticsImpl<'db> {
                         None
                     }
                 }
-                ExprOrPatId::PatId(pat_id) => {
-                    if let Pat::Path(path) = &store[pat_id] {
-                        Some(path)
-                    } else {
-                        None
-                    }
-                }
+                ExprOrPatId::PatId(_) => None,
             };
 
             if let Some(path) = path
@@ -2429,7 +2462,8 @@ impl<'db> SemanticsImpl<'db> {
                         if result.is_err()
                             && let Some(tree) = proof_tree
                         {
-                            let data = dump_proof_tree_structured(tree, Span::dummy(), infer_ctxt);
+                            let data =
+                                dump_proof_tree_structured(tree, hir_ty::Span::Dummy, infer_ctxt);
                             RESULT.with(|ctx| ctx.borrow_mut().push(data));
                         }
                     }),
@@ -2761,15 +2795,6 @@ impl RenameConflictsVisitor<'_> {
             Expr::Path(path) => {
                 let guard = self.resolver.update_to_inner_scope(self.db, self.owner, expr);
                 self.resolve_path(expr.into(), path);
-                self.resolver.reset_to_guard(guard);
-            }
-            &Expr::Assignment { target, .. } => {
-                let guard = self.resolver.update_to_inner_scope(self.db, self.owner, expr);
-                self.body.walk_pats(target, &mut |pat| {
-                    if let Pat::Path(path) = &self.body[pat] {
-                        self.resolve_path(pat.into(), path);
-                    }
-                });
                 self.resolver.reset_to_guard(guard);
             }
             _ => {}

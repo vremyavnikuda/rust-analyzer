@@ -21,7 +21,7 @@ use rustc_type_ir::{
 use triomphe::Arc;
 
 use crate::{
-    InferenceResult, ParamEnvAndCrate,
+    ParamEnvAndCrate,
     consteval::try_const_usize,
     db::HirDatabase,
     next_solver::{
@@ -177,7 +177,7 @@ pub fn layout_of_ty_query(
         .unwrap_or(ty.as_ref());
     let result = match ty.kind() {
         TyKind::Adt(def, args) => {
-            match def.inner().id {
+            match def.def_id() {
                 hir_def::AdtId::StructId(s) => {
                     let repr = AttrFlags::repr(db, s.into()).unwrap_or_default();
                     if repr.simd() {
@@ -193,7 +193,7 @@ pub fn layout_of_ty_query(
                 }
                 _ => {}
             }
-            return db.layout_of_adt(def.inner().id, args.store(), trait_env);
+            return db.layout_of_adt(def.def_id(), args.store(), trait_env);
         }
         TyKind::Bool => Layout::scalar(
             dl,
@@ -331,25 +331,18 @@ pub fn layout_of_ty_query(
             ptr.valid_range_mut().start = 1;
             Layout::scalar(dl, ptr)
         }
-        TyKind::Closure(id, args) => {
-            let def = id.0.loc(db);
-            let infer = InferenceResult::of(db, def.0);
-            let (captures, _) = infer.closure_info(id.0);
-            let fields = captures
-                .iter()
-                .map(|it| {
-                    let ty = it.ty.get().instantiate(interner, args.as_closure().parent_args());
-                    db.layout_of_ty(ty.store(), trait_env.clone())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let fields = fields.iter().map(|it| &**it).collect::<Vec<_>>();
-            let fields = fields.iter().collect::<IndexVec<_, _>>();
-            cx.calc.univariant(&fields, &ReprOptions::default(), StructKind::AlwaysSized)?
+        TyKind::Closure(_, args) => {
+            return db.layout_of_ty(args.as_closure().tupled_upvars_ty().store(), trait_env);
+        }
+        TyKind::Coroutine(_, args) => {
+            return db.layout_of_ty(args.as_coroutine().tupled_upvars_ty().store(), trait_env);
+        }
+        TyKind::CoroutineClosure(_, args) => {
+            return db
+                .layout_of_ty(args.as_coroutine_closure().tupled_upvars_ty().store(), trait_env);
         }
 
-        TyKind::Coroutine(_, _)
-        | TyKind::CoroutineWitness(_, _)
-        | TyKind::CoroutineClosure(_, _) => {
+        TyKind::CoroutineWitness(_, _) => {
             return Err(LayoutError::NotImplemented);
         }
 
@@ -381,7 +374,7 @@ pub(crate) fn layout_of_ty_cycle_result(
 fn struct_tail_erasing_lifetimes<'a>(db: &'a dyn HirDatabase, pointee: Ty<'a>) -> Ty<'a> {
     match pointee.kind() {
         TyKind::Adt(def, args) => {
-            let struct_id = match def.inner().id {
+            let struct_id = match def.def_id() {
                 AdtId::StructId(id) => id,
                 _ => return pointee,
             };

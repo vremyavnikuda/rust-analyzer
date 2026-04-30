@@ -739,7 +739,7 @@ fn foo() -> Result<(), ()> {
 
         check_fix(
             r#"
-//- minicore: result
+//- minicore: result, iterator
 fn foo() -> Result<(), ()> {
     for _ in 0..5 {}$0
 }
@@ -1190,9 +1190,7 @@ fn f() {
     let &() = &mut ();
       //^^^ error: expected &mut (), found &()
     match &() {
-        // FIXME: we should only show the deep one.
         &9 => ()
-      //^^ error: expected &(), found &i32
        //^ error: expected (), found i32
     }
 }
@@ -1245,7 +1243,7 @@ trait B {}
 
 fn test(a: &dyn A) -> &dyn B {
     a
-  //^ error: expected &(dyn B + 'static), found &(dyn A + 'static)
+  //^💡 error: expected &(dyn B + 'static), found &(dyn A + 'static)
 }
 "#,
         );
@@ -1342,6 +1340,7 @@ pub fn foo<T: Foo>(_: T) -> (T::Out,) { loop { } }
 
 fn main() {
     let _x = foo(2);
+     // ^^ error: type annotations needed
 }
 "#,
         );

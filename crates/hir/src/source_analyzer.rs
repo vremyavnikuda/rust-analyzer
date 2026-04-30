@@ -47,7 +47,7 @@ use itertools::Itertools;
 use rustc_hash::FxHashSet;
 use rustc_type_ir::{
     AliasTyKind,
-    inherent::{AdtDef, IntoKind, Ty as _},
+    inherent::{IntoKind, Ty as _},
 };
 use smallvec::SmallVec;
 use stdx::never;
@@ -409,7 +409,7 @@ impl<'db> SourceAnalyzer<'db> {
             ExprOrPatId::PatId(idx) => infer
                 .pat_adjustment(idx)
                 .and_then(|adjusts| adjusts.last())
-                .map(|adjust| adjust.as_ref()),
+                .map(|adjust| adjust.source.as_ref()),
         };
 
         let ty = infer.expr_or_pat_ty(expr_or_pat_id);
@@ -449,12 +449,12 @@ impl<'db> SourceAnalyzer<'db> {
     ) -> Option<BindingMode> {
         let id = self.pat_id(&pat.clone().into())?;
         let infer = self.infer()?;
-        infer.binding_mode(id.as_pat()?).map(|bm| match bm {
-            hir_ty::BindingMode::Move => BindingMode::Move,
-            hir_ty::BindingMode::Ref(hir_ty::next_solver::Mutability::Mut) => {
+        Some(match infer.binding_mode(id.as_pat()?)? {
+            hir_ty::BindingMode(hir_ty::ByRef::No, _) => BindingMode::Move,
+            hir_ty::BindingMode(hir_ty::ByRef::Yes(hir_ty::next_solver::Mutability::Mut), _) => {
                 BindingMode::Ref(Mutability::Mut)
             }
-            hir_ty::BindingMode::Ref(hir_ty::next_solver::Mutability::Not) => {
+            hir_ty::BindingMode(hir_ty::ByRef::Yes(hir_ty::next_solver::Mutability::Not), _) => {
                 BindingMode::Ref(Mutability::Shared)
             }
         })
@@ -470,7 +470,7 @@ impl<'db> SourceAnalyzer<'db> {
             infer
                 .pat_adjustment(pat_id.as_pat()?)?
                 .iter()
-                .map(|ty| Type::new_with_resolver(db, &self.resolver, ty.as_ref()))
+                .map(|adjust| Type::new_with_resolver(db, &self.resolver, adjust.source.as_ref()))
                 .collect(),
         )
     }
@@ -626,8 +626,7 @@ impl<'db> SourceAnalyzer<'db> {
         has_start: bool,
         has_end: bool,
     ) -> Option<StructId> {
-        let has_new_range =
-            self.resolver.top_level_def_map().is_unstable_feature_enabled(&sym::new_range);
+        let has_new_range = self.resolver.top_level_def_map().features().new_range;
         let lang_items = self.lang_items(db);
         match (op_kind, has_start, has_end) {
             (RangeOp::Exclusive, false, false) => lang_items.RangeFull,
@@ -957,7 +956,7 @@ impl<'db> SourceAnalyzer<'db> {
                         handle_variants(VariantId::from(variant_id), subst, &mut container)?
                     }
                     Either::Right(container_ty) => match container_ty.kind() {
-                        TyKind::Adt(adt_def, subst) => match adt_def.def_id().0 {
+                        TyKind::Adt(adt_def, subst) => match adt_def.def_id() {
                             AdtId::StructId(id) => {
                                 handle_variants(id.into(), subst, &mut container)?
                             }
@@ -1287,7 +1286,7 @@ impl<'db> SourceAnalyzer<'db> {
                 let env = self.trait_environment(db);
                 let (subst, expected_resolution) = match ty.kind() {
                     TyKind::Adt(adt_def, subst) => {
-                        let adt_id = adt_def.def_id().0;
+                        let adt_id = adt_def.def_id();
                         (
                             GenericSubstitution::new(adt_id.into(), subst, env),
                             PathResolution::Def(ModuleDef::Adt(adt_id.into())),

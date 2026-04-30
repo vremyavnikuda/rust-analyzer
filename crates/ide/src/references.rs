@@ -599,7 +599,7 @@ fn main() {
             false,
             false,
             expect![[r#"
-                Some Variant FileId(1) 5999..6031 6024..6028
+                Some Variant FileId(1) 6022..6054 6047..6051
 
                 FileId(0) 46..50
             "#]],
@@ -2740,6 +2740,7 @@ fn test() {
     fn goto_ref_fn_kw() {
         check(
             r#"
+//- minicore: fn
 macro_rules! N {
     ($i:ident, $x:expr, $blk:expr) => {
         for $i in 0..$x {

@@ -1956,7 +1956,7 @@ fn main() {
     Alias::Braced;
   //^^^^^^^^^^^^^ {unknown}
     let Alias::Braced = loop {};
-      //^^^^^^^^^^^^^ !
+      //^^^^^^^^^^^^^ {unknown}
   let Alias::Braced(..) = loop {};
     //^^^^^^^^^^^^^^^^^ Enum
 
@@ -2363,6 +2363,7 @@ fn test() {
 }
 "#,
         expect![[r#"
+            46..49 'Foo': Foo<N>
             93..97 'self': Foo<N>
             108..125 '{     ...     }': usize
             118..119 'N': usize
@@ -2858,7 +2859,7 @@ fn foo<T: B>(v: T::T) {}
 }
 
 #[test]
-fn regression_() {
+fn regression_22007() {
     check_types(
         r#"
 //- minicore: fn
@@ -2882,5 +2883,33 @@ fn foo() {
  // ^^^^^^^^^^^^ u8
 }
     "#,
+    );
+}
+
+#[test]
+fn regression_21885() {
+    check_no_mismatches(
+        r#"
+//- minicore: coerce_unsized, future, result
+use core::future::Future;
+
+trait Foo {
+    type Assoc;
+
+    fn foo() -> &dyn Future<Output = Result<Self::Assoc, ()>>;
+}
+
+struct Bar;
+
+impl Foo for Bar {
+    type Assoc = NotFound;
+
+    fn foo() -> &dyn Future<Output = Result<Self::Assoc, ()>> {
+        &async {
+            Err(())
+        }
+    }
+}
+"#,
     );
 }

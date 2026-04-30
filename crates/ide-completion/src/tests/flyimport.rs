@@ -781,9 +781,9 @@ fn main() {
 }
 "#,
         expect![[r#"
+            me random_method(…) (use dep::test_mod::TestTrait) fn(&self) DEPRECATED
             ct SPECIAL_CONST (use dep::test_mod::TestTrait)           u8 DEPRECATED
             fn weird_function() (use dep::test_mod::TestTrait)      fn() DEPRECATED
-            me random_method(…) (use dep::test_mod::TestTrait) fn(&self) DEPRECATED
         "#]],
     );
 }
@@ -2055,5 +2055,40 @@ fn main() {
     test.test_function()$0
 }
 "#,
+    );
+}
+
+#[test]
+fn prefer_underscore_import() {
+    check_edit(
+        "bar",
+        r#"
+mod foo {
+    #[rust_analyzer::prefer_underscore_import]
+    pub trait Ext {
+        fn bar(&self) {}
+    }
+    impl<T> Ext for T {}
+}
+
+fn baz() {
+    1.bar$0
+}
+    "#,
+        r#"
+use foo::Ext as _;
+
+mod foo {
+    #[rust_analyzer::prefer_underscore_import]
+    pub trait Ext {
+        fn bar(&self) {}
+    }
+    impl<T> Ext for T {}
+}
+
+fn baz() {
+    1.bar();$0
+}
+    "#,
     );
 }

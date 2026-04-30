@@ -11,6 +11,7 @@
 //!     add:
 //!     asm:
 //!     assert:
+//!     async_iterator: option, future, pin
 //!     as_mut: sized
 //!     as_ref: sized
 //!     async_fn: fn, tuple, future, copy
@@ -33,6 +34,7 @@
 //!     env: option
 //!     eq: sized
 //!     error: fmt
+//!     float_consts:
 //!     fmt: option, result, transmute, coerce_unsized, copy, clone, derive
 //!     fmt_before_1_93_0: fmt
 //!     fmt_before_1_89_0: fmt_before_1_93_0
@@ -50,6 +52,7 @@
 //!     iterator: option
 //!     iterators: iterator, fn
 //!     manually_drop: drop
+//!     matches:
 //!     non_null:
 //!     non_zero:
 //!     option: panic
@@ -66,7 +69,7 @@
 //!     size_of: sized
 //!     sized:
 //!     slice:
-//!     str:
+//!     str: sized, result
 //!     sync: sized
 //!     transmute:
 //!     try: infallible
@@ -936,6 +939,14 @@ pub mod ops {
                 }
             }
         }
+
+        mod internal_implementation_detail {
+            #[lang = "async_fn_kind_helper"]
+            trait AsyncFnKindHelper<GoalKind> {
+                #[lang = "async_fn_kind_upvars"]
+                type Upvars<'closure_env, Inputs, Upvars, BorrowedUpvarsAsFnPtr>;
+            }
+        }
     }
     pub use self::async_function::{AsyncFn, AsyncFnMut, AsyncFnOnce};
     // endregion:async_fn
@@ -1521,6 +1532,7 @@ pub mod slice {
 
 // region:option
 pub mod option {
+    #[lang = "Option"]
     pub enum Option<T> {
         #[lang = "None"]
         None,
@@ -1670,6 +1682,7 @@ pub mod future {
     }
 }
 pub mod task {
+    #[lang = "Poll"]
     pub enum Poll<T> {
         #[lang = "Ready"]
         Ready(T),
@@ -1682,6 +1695,22 @@ pub mod task {
     }
 }
 // endregion:future
+
+// region:async_iterator
+pub mod async_iter {
+    use crate::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    #[lang = "async_iterator"]
+    pub trait AsyncIterator {
+        type Item;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>;
+    }
+}
+// endregion:async_iterator
 
 // region:iterator
 pub mod iter {
@@ -1713,6 +1742,22 @@ pub mod iter {
             type Item = I::Item;
 
             fn next(&mut self) -> Option<I::Item> {
+                loop {}
+            }
+        }
+
+        pub struct Map<I, F> {
+            iter: I,
+            f: F,
+        }
+        impl<B, I: Iterator, F> Iterator for Map<I, F>
+        where
+            F: FnMut(I::Item) -> B,
+        {
+            type Item = B;
+
+            #[inline]
+            fn next(&mut self) -> B {
                 loop {}
             }
         }
@@ -1788,6 +1833,13 @@ pub mod iter {
                 where
                     Self: Sized,
                     P: FnMut(&Self::Item) -> bool,
+                {
+                    loop {}
+                }
+                fn map<B, F>(self, _f: F) -> crate::iter::Map<Self, F>
+                where
+                    Self: Sized,
+                    F: FnMut(Self::Item) -> B,
                 {
                     loop {}
                 }
@@ -2173,6 +2225,32 @@ pub mod error {
 }
 // endregion:error
 
+// region:float_consts
+impl f32 {
+    pub const INFINITY: f32 = 0.0;
+    pub const NEG_INFINITY: f32 = -0.0;
+}
+
+impl f64 {
+    pub const INFINITY: f64 = 0.0;
+    pub const NEG_INFINITY: f64 = -0.0;
+}
+
+pub mod f32 {
+    #[deprecated]
+    pub const INFINITY: f32 = 0.0;
+    #[deprecated]
+    pub const NEG_INFINITY: f32 = -0.0;
+}
+
+pub mod f64 {
+    #[deprecated]
+    pub const INFINITY: f64 = 0.0;
+    #[deprecated]
+    pub const NEG_INFINITY: f64 = -0.0;
+}
+// endregion:float_consts
+
 // region:column
 #[rustc_builtin_macro]
 #[macro_export]
@@ -2180,6 +2258,20 @@ macro_rules! column {
     () => {};
 }
 // endregion:column
+
+// region:matches
+#[macro_export]
+#[allow_internal_unstable(non_exhaustive_omitted_patterns_lint, stmt_expr_attributes)]
+macro_rules! matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        #[allow(non_exhaustive_omitted_patterns)]
+        match $expression {
+            $pattern $(if $guard)? => true,
+            _ => false
+        }
+    };
+}
+// endregion:matches
 
 pub mod prelude {
     pub mod v1 {

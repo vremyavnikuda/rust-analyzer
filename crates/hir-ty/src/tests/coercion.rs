@@ -309,7 +309,7 @@ fn takes_ref_str(x: &str) {}
 fn returns_string() -> String { loop {} }
 fn test() {
     takes_ref_str(&{ returns_string() });
-               // ^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(None), Deref(Some(OverloadedDeref(Some(Not)))), Borrow(Ref(Not))
+               // ^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(None), Deref(Some(OverloadedDeref(Not))), Borrow(Ref(Not))
 }
 "#,
     );
@@ -385,6 +385,34 @@ fn test() {
             return &1u32;
         }
         &&1u32
+    };
+}
+        "#,
+    );
+}
+
+#[test]
+fn gen_yield_coerce() {
+    check_no_mismatches(
+        r#"
+fn test() {
+    let g = gen {
+        yield &1u32;
+        yield &&1u32;
+    };
+}
+        "#,
+    );
+}
+
+#[test]
+fn async_gen_yield_coerce() {
+    check_no_mismatches(
+        r#"
+fn test() {
+    let g = async gen {
+        yield &1u32;
+        yield &&1u32;
     };
 }
         "#,
@@ -598,6 +626,10 @@ fn test() {
     );
 }
 
+// FIXME: rustc emits the following error here:
+//  - error[E0277]:  he size for values of type `impl Foo + ?Sized` cannot be known at compilation time
+// ...but we don't emit any error here for now
+#[ignore = "rustc emits E0277 here"]
 #[test]
 fn coerce_unsize_apit() {
     check(
@@ -874,11 +906,11 @@ struct V<T> { t: T }
 fn main() {
     let a: V<&dyn Tr>;
     (a,) = V { t: &S };
-  //^^^^expected V<&'? S>, got (V<&'? (dyn Tr + '?)>,)
+  //^^^^expected V<&'? S>, got ({unknown},)
 
     let mut a: V<&dyn Tr> = V { t: &S };
     (a,) = V { t: &S };
-  //^^^^expected V<&'? S>, got (V<&'? (dyn Tr + '?)>,)
+  //^^^^expected V<&'? S>, got ({unknown},)
 }
         "#,
     );

@@ -357,7 +357,7 @@ fn main() {
 "#,
             expect![[r#"
                 bar!
-                for _ in 0..42{}"#]],
+                for _ in 0..42 {}"#]],
         );
     }
 
@@ -433,9 +433,9 @@ fn main() {
             expect![[r#"
                 match_ast!
                 {
-                    if let Some(it) = ast::TraitDef::cast(container.clone()){}
-                    else if let Some(it) = ast::ImplDef::cast(container.clone()){}
-                    else {
+                    if let Some(it) = ast::TraitDef::cast(container.clone()){
+                    }else if let Some(it) = ast::ImplDef::cast(container.clone()){
+                    }else {
                         {
                             continue
                         }
@@ -448,6 +448,7 @@ fn main() {
     fn macro_expand_match_ast_inside_let_statement() {
         check(
             r#"
+//- minicore: try
 macro_rules! match_ast {
     (match $node:ident { $($tt:tt)* }) => { match_ast!(match ($node) { $($tt)* }) };
     (match ($node:expr) {}) => {{}};
@@ -593,7 +594,7 @@ struct Foo {}
 "#,
             expect![[r#"
                 proc_macros::DeriveIdentity
-                struct Foo{}"#]],
+                struct Foo {}"#]],
         );
     }
 
@@ -611,7 +612,7 @@ struct Foo {}
             expect![[r#"
                 proc_macros::DeriveIdentity
                 #[derive(proc_macros::DeriveIdentity)]
-                struct Foo{}"#]],
+                struct Foo {}"#]],
         );
     }
 
@@ -627,7 +628,7 @@ struct Foo {}
 "#,
             expect![[r#"
                 proc_macros::DeriveIdentity
-                struct Foo{}"#]],
+                struct Foo {}"#]],
         );
         check(
             r#"
@@ -639,7 +640,7 @@ struct Foo {}
 "#,
             expect![[r#"
                 proc_macros::DeriveIdentity
-                struct Foo{}"#]],
+                struct Foo {}"#]],
         );
     }
 
@@ -782,7 +783,6 @@ foo();
                 macro_rules! foo {
                     () => {
                         fn item(){}
-
                     };
                 }
                 foo();"#]],

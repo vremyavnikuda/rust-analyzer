@@ -485,7 +485,7 @@ fn main() {
 
     let b = &raw const x.a;
 
-    let tmp = Vec::from([1, 2, 3]);
+    let tmp = [1, 2, 3];
 
     let c = &raw const tmp[x.a];
                         // ^^^ 💡 error: access to union field is unsafe and requires an unsafe function or block
@@ -845,6 +845,7 @@ fn foo(v: &Union) {
     fn union_destructuring() {
         check_diagnostics(
             r#"
+//- minicore: fn
 union Union { field: u8 }
 fn foo(v @ Union { field: _field }: &Union) {
                        // ^^^^^^ error: access to union field is unsafe and requires an unsafe function or block

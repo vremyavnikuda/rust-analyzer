@@ -10,7 +10,7 @@ use rustc_hash::FxHashSet;
 use rustc_type_ir::{
     InferTy, TypeVisitableExt, UintTy, elaborate,
     error::TypeError,
-    inherent::{AdtDef, BoundExistentialPredicates as _, IntoKind, Ty as _},
+    inherent::{BoundExistentialPredicates as _, IntoKind, Ty as _},
 };
 use stdx::never;
 
@@ -131,7 +131,7 @@ impl<'db> CastCheck<'db> {
         // This should always come first so that we apply the coercion, which impacts infer vars.
         if ctx
             .coerce(
-                self.source_expr.into(),
+                self.source_expr,
                 self.expr_ty,
                 self.cast_ty,
                 AllowTwoPhase::No,
@@ -147,7 +147,8 @@ impl<'db> CastCheck<'db> {
             return Ok(());
         }
 
-        if !self.cast_ty.has_infer_types() && !ctx.table.is_sized(self.cast_ty) {
+        if !self.cast_ty.has_infer_types() && !ctx.table.type_is_sized_modulo_regions(self.cast_ty)
+        {
             return Err(InferenceDiagnostic::CastToUnsized {
                 expr: self.expr,
                 cast_ty: self.cast_ty.store(),
@@ -167,7 +168,7 @@ impl<'db> CastCheck<'db> {
                         let sig = self.expr_ty.fn_sig(ctx.interner());
                         let fn_ptr = Ty::new_fn_ptr(ctx.interner(), sig);
                         match ctx.coerce(
-                            self.source_expr.into(),
+                            self.source_expr,
                             self.expr_ty,
                             fn_ptr,
                             AllowTwoPhase::No,
@@ -199,7 +200,7 @@ impl<'db> CastCheck<'db> {
                             // array-ptr-cast
                             CastTy::Ptr(t, m) => {
                                 let t = ctx.table.try_structurally_resolve_type(t);
-                                if !ctx.table.is_sized(t) {
+                                if !ctx.table.type_is_sized_modulo_regions(t) {
                                     return Err(CastError::IllegalCast);
                                 }
                                 self.check_ref_cast(ctx, inner_ty, mutbl, t, m)
@@ -275,7 +276,7 @@ impl<'db> CastCheck<'db> {
             let array_ptr_type = Ty::new_ptr(ctx.interner(), t_expr, m_expr);
             if ctx
                 .coerce(
-                    self.source_expr.into(),
+                    self.source_expr,
                     self.expr_ty,
                     array_ptr_type,
                     AllowTwoPhase::No,
@@ -520,7 +521,7 @@ fn pointer_kind<'db>(
 ) -> Result<Option<PointerKind<'db>>, ()> {
     let ty = ctx.table.try_structurally_resolve_type(ty);
 
-    if ctx.table.is_sized(ty) {
+    if ctx.table.type_is_sized_modulo_regions(ty) {
         return Ok(Some(PointerKind::Thin));
     }
 
@@ -528,7 +529,7 @@ fn pointer_kind<'db>(
         TyKind::Slice(_) | TyKind::Str => Ok(Some(PointerKind::Length)),
         TyKind::Dynamic(bounds, _) => Ok(Some(PointerKind::VTable(bounds))),
         TyKind::Adt(adt_def, subst) => {
-            let id = adt_def.def_id().0;
+            let id = adt_def.def_id();
             let AdtId::StructId(id) = id else {
                 never!("`{:?}` should be sized but is not?", ty);
                 return Err(());

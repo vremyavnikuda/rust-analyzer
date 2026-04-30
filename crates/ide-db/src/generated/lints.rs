@@ -286,6 +286,13 @@ pub const DEFAULT_LINTS: &[Lint] = &[
         deny_since: None,
     },
     Lint {
+        label: "deprecated_llvm_intrinsic",
+        description: r##"detects uses of deprecated LLVM intrinsics"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "deprecated_safe_2024",
         description: r##"detects unsafe functions being used as safe functions"##,
         default_severity: Severity::Allow,
@@ -422,6 +429,13 @@ pub const DEFAULT_LINTS: &[Lint] = &[
         label: "ffi_unwind_calls",
         description: r##"call to foreign functions or function pointers with FFI-unwind ABI"##,
         default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "float_literal_f32_fallback",
+        description: r##"detects unsuffixed floating point literals whose type fallback to `f32`"##,
+        default_severity: Severity::Warning,
         warn_since: None,
         deny_since: None,
     },
@@ -1224,6 +1238,13 @@ pub const DEFAULT_LINTS: &[Lint] = &[
         deny_since: None,
     },
     Lint {
+        label: "tail_call_track_caller",
+        description: r##"detects tail calls of functions marked with `#[track_caller]`"##,
+        default_severity: Severity::Warning,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "tail_expr_drop_order",
         description: r##"Detect and warn on significant change in drop order in tail expression location"##,
         default_severity: Severity::Allow,
@@ -1681,7 +1702,7 @@ pub const DEFAULT_LINTS: &[Lint] = &[
     Lint {
         label: "varargs_without_pattern",
         description: r##"detects usage of `...` arguments without a pattern in non-foreign items"##,
-        default_severity: Severity::Warning,
+        default_severity: Severity::Error,
         warn_since: None,
         deny_since: None,
     },
@@ -1715,7 +1736,7 @@ pub const DEFAULT_LINTS: &[Lint] = &[
     },
     Lint {
         label: "future_incompatible",
-        description: r##"lint group for: internal-eq-trait-method-impls, aarch64-softfloat-neon, ambiguous-associated-items, ambiguous-derive-helpers, ambiguous-glob-imported-traits, ambiguous-glob-imports, ambiguous-import-visibilities, ambiguous-panic-imports, coherence-leak-check, conflicting-repr-hints, const-evaluatable-unchecked, elided-lifetimes-in-associated-constant, forbidden-lint-groups, ill-formed-attribute-input, invalid-macro-export-arguments, invalid-type-param-default, late-bound-lifetime-arguments, legacy-derive-helpers, macro-expanded-macro-exports-accessed-by-absolute-paths, out-of-scope-macro-calls, patterns-in-fns-without-body, proc-macro-derive-resolution-fallback, pub-use-of-private-extern-crate, repr-c-enums-larger-than-int, repr-transparent-non-zst-fields, self-constructor-from-outer-item, semicolon-in-expressions-from-macros, uncovered-param-in-projection, uninhabited-static, unstable-name-collisions, unstable-syntax-pre-expansion, unsupported-calling-conventions, varargs-without-pattern"##,
+        description: r##"lint group for: internal-eq-trait-method-impls, aarch64-softfloat-neon, ambiguous-associated-items, ambiguous-derive-helpers, ambiguous-glob-imported-traits, ambiguous-glob-imports, ambiguous-import-visibilities, ambiguous-panic-imports, coherence-leak-check, conflicting-repr-hints, const-evaluatable-unchecked, elided-lifetimes-in-associated-constant, float-literal-f32-fallback, forbidden-lint-groups, ill-formed-attribute-input, invalid-macro-export-arguments, invalid-type-param-default, late-bound-lifetime-arguments, legacy-derive-helpers, macro-expanded-macro-exports-accessed-by-absolute-paths, out-of-scope-macro-calls, patterns-in-fns-without-body, proc-macro-derive-resolution-fallback, pub-use-of-private-extern-crate, repr-c-enums-larger-than-int, repr-transparent-non-zst-fields, self-constructor-from-outer-item, semicolon-in-expressions-from-macros, uncovered-param-in-projection, uninhabited-static, unstable-name-collisions, unstable-syntax-pre-expansion, unsupported-calling-conventions, varargs-without-pattern"##,
         default_severity: Severity::Allow,
         warn_since: None,
         deny_since: None,
@@ -1790,13 +1811,6 @@ pub const DEFAULT_LINTS: &[Lint] = &[
         warn_since: None,
         deny_since: None,
     },
-    Lint {
-        label: "warnings",
-        description: r##"lint group for: all lints that are set to issue warnings"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
 ];
 
 pub const DEFAULT_LINT_GROUPS: &[LintGroup] = &[
@@ -1813,7 +1827,7 @@ pub const DEFAULT_LINT_GROUPS: &[LintGroup] = &[
     LintGroup {
         lint: Lint {
             label: "future_incompatible",
-            description: r##"lint group for: internal-eq-trait-method-impls, aarch64-softfloat-neon, ambiguous-associated-items, ambiguous-derive-helpers, ambiguous-glob-imported-traits, ambiguous-glob-imports, ambiguous-import-visibilities, ambiguous-panic-imports, coherence-leak-check, conflicting-repr-hints, const-evaluatable-unchecked, elided-lifetimes-in-associated-constant, forbidden-lint-groups, ill-formed-attribute-input, invalid-macro-export-arguments, invalid-type-param-default, late-bound-lifetime-arguments, legacy-derive-helpers, macro-expanded-macro-exports-accessed-by-absolute-paths, out-of-scope-macro-calls, patterns-in-fns-without-body, proc-macro-derive-resolution-fallback, pub-use-of-private-extern-crate, repr-c-enums-larger-than-int, repr-transparent-non-zst-fields, self-constructor-from-outer-item, semicolon-in-expressions-from-macros, uncovered-param-in-projection, uninhabited-static, unstable-name-collisions, unstable-syntax-pre-expansion, unsupported-calling-conventions, varargs-without-pattern"##,
+            description: r##"lint group for: internal-eq-trait-method-impls, aarch64-softfloat-neon, ambiguous-associated-items, ambiguous-derive-helpers, ambiguous-glob-imported-traits, ambiguous-glob-imports, ambiguous-import-visibilities, ambiguous-panic-imports, coherence-leak-check, conflicting-repr-hints, const-evaluatable-unchecked, elided-lifetimes-in-associated-constant, float-literal-f32-fallback, forbidden-lint-groups, ill-formed-attribute-input, invalid-macro-export-arguments, invalid-type-param-default, late-bound-lifetime-arguments, legacy-derive-helpers, macro-expanded-macro-exports-accessed-by-absolute-paths, out-of-scope-macro-calls, patterns-in-fns-without-body, proc-macro-derive-resolution-fallback, pub-use-of-private-extern-crate, repr-c-enums-larger-than-int, repr-transparent-non-zst-fields, self-constructor-from-outer-item, semicolon-in-expressions-from-macros, uncovered-param-in-projection, uninhabited-static, unstable-name-collisions, unstable-syntax-pre-expansion, unsupported-calling-conventions, varargs-without-pattern"##,
             default_severity: Severity::Allow,
             warn_since: None,
             deny_since: None,
@@ -1831,6 +1845,7 @@ pub const DEFAULT_LINT_GROUPS: &[LintGroup] = &[
             "conflicting_repr_hints",
             "const_evaluatable_unchecked",
             "elided_lifetimes_in_associated_constant",
+            "float_literal_f32_fallback",
             "forbidden_lint_groups",
             "ill_formed_attribute_input",
             "invalid_macro_export_arguments",
@@ -2484,6 +2499,22 @@ Allows `extern "x86-interrupt" fn()`.
 The tracking issue for this feature is: [#40180]
 
 [#40180]: https://github.com/rust-lang/rust/issues/40180
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "abort_immediate",
+        description: r##"# `abort_immediate`
+
+
+
+The tracking issue for this feature is: [#154601]
+
+[#154601]: https://github.com/rust-lang/rust/issues/154601
 
 ------------------------
 "##,
@@ -4289,7 +4320,7 @@ defined in Rust. They may be called both from within Rust and via FFI.
 pub unsafe extern "C" fn add(n: usize, mut args: ...) -> usize {
     let mut sum = 0;
     for _ in 0..n {
-        sum += args.arg::<usize>();
+        sum += args.next_arg::<usize>();
     }
     sum
 }
@@ -4621,6 +4652,47 @@ This feature has no tracking issue, and is therefore likely internal to the comp
         deny_since: None,
     },
     Lint {
+        label: "cfg_target_object_format",
+        description: r##"# `cfg_target_object_format`
+
+The tracking issue for this feature is: [#152586]
+
+[#152586]: https://github.com/rust-lang/rust/issues/152586
+
+------------------------
+
+The `cfg_target_object_format` feature makes it possible to execute different code
+depending on the current target's object file format.
+
+## Examples
+
+```rust
+#![feature(cfg_target_object_format)]
+
+#[cfg(target_object_format = "elf")]
+fn a() {
+    // ...
+}
+
+#[cfg(target_object_format = "mach-o")]
+fn a() {
+    // ...
+}
+
+fn b() {
+    if cfg!(target_object_format = "wasm") {
+        // ...
+    } else {
+        // ...
+    }
+}
+```
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "cfg_target_thread_local",
         description: r##"# `cfg_target_thread_local`
 
@@ -4733,22 +4805,6 @@ extern {
 
 
 This feature has no tracking issue, and is therefore likely internal to the compiler, not being intended for general use.
-
-------------------------
-"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
-    Lint {
-        label: "char_max_len",
-        description: r##"# `char_max_len`
-
-
-
-The tracking issue for this feature is: [#121714]
-
-[#121714]: https://github.com/rust-lang/rust/issues/121714
 
 ------------------------
 "##,
@@ -5939,6 +5995,22 @@ This feature has no tracking issue, and is therefore likely internal to the comp
         deny_since: None,
     },
     Lint {
+        label: "core_io",
+        description: r##"# `core_io`
+
+
+
+The tracking issue for this feature is: [#154046]
+
+[#154046]: https://github.com/rust-lang/rust/issues/154046
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "core_io_borrowed_buf",
         description: r##"# `core_io_borrowed_buf`
 
@@ -5947,6 +6019,20 @@ This feature has no tracking issue, and is therefore likely internal to the comp
 The tracking issue for this feature is: [#117693]
 
 [#117693]: https://github.com/rust-lang/rust/issues/117693
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "core_io_internals",
+        description: r##"# `core_io_internals`
+
+
+
+This feature has no tracking issue, and is therefore likely internal to the compiler, not being intended for general use.
 
 ------------------------
 "##,
@@ -6921,13 +7007,96 @@ The tracking issue for this feature is: [#143874]
         label: "diagnostic_on_move",
         description: r##"# `diagnostic_on_move`
 
-Allows giving on-move borrowck custom diagnostic messages for a type
-
 The tracking issue for this feature is: [#154181]
 
-[#154181]: https://github.com/rust-lang/rust/issues/154181
-
 ------------------------
+
+The `diagnostic_on_move` feature allows use of the `#[diagnostic::on_move]` attribute. It should be
+placed on struct, enum and union declarations, though it is not an error to be located in other
+positions. This attribute is a hint to the compiler to supplement the error message when the
+annotated type is involved in a borrowcheck error.
+
+For example, [`File`] is annotated as such:
+```rust
+#![feature(diagnostic_on_move)]
+
+#[diagnostic::on_move(note = "you can use `File::try_clone` \
+                             to duplicate a `File` instance")]
+pub struct File {
+    // ...
+}
+```
+
+When you try to use a `File` after it's already been moved, it will helpfully tell you about `try_clone`.
+
+The message and label can also be customized:
+
+```rust
+#![feature(diagnostic_on_move)]
+
+use std::marker::PhantomData;
+
+#[diagnostic::on_move(
+    message = "`{Self}` cannot be used multiple times",
+    label = "this token may only be used once",
+    note = "you can create a new `Token` with `Token::conjure()`"
+)]
+pub struct Token<'brand> {
+    spooky: PhantomData<&'brand ()>,
+}
+
+impl Token<'_> {
+    pub fn conjure<'u>() -> Token<'u> {
+        Token {
+            spooky: PhantomData,
+        }
+    }
+}
+```
+The user may try to use it like this:
+```rust,compile_fail,E0382
+# #![feature(diagnostic_on_move)]
+#
+# use std::marker::PhantomData;
+#
+# #[diagnostic::on_move(
+#     message = "`{Self}` cannot be used multiple times",
+#     label = "this token may only be used once",
+#     note = "you can create a new `Token` with `Token::conjure()`"
+# )]
+# pub struct Token<'brand> {
+#     spooky: PhantomData<&'brand ()>,
+# }
+#
+# impl Token<'_> {
+#     pub fn conjure<'u>() -> Token<'u> {
+#         Token {
+#             spooky: PhantomData,
+#         }
+#     }
+# }
+# fn main() {
+let token = Token::conjure();
+let _ = (token, token);
+# }
+```
+This will result in the following error:
+```text
+error[E0382]: `Token` cannot be used multiple times
+  --> src/main.rs:24:21
+   |
+ 1 |     let token = Token::conjure();
+   |         ----- this token may only be used once
+ 2 |     let _ = (token, token);
+   |              -----  ^^^^^ value used here after move
+   |              |
+   |              value moved here
+   |
+   = note: you can create a new `Token` with `Token::conjure()`
+```
+
+[`File`]: https://doc.rust-lang.org/nightly/std/fs/struct.File.html "File in std::fs"
+[#154181]: https://github.com/rust-lang/rust/issues/154181 "Tracking Issue for #[diagnostic::on_move]"
 "##,
         default_severity: Severity::Allow,
         warn_since: None,
@@ -6944,6 +7113,66 @@ The tracking issue for this feature is: [#152900]
 [#152900]: https://github.com/rust-lang/rust/issues/152900
 
 ------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "diagnostic_on_unmatch_args",
+        description: r##"# `diagnostic_on_unmatch_args`
+
+The tracking issue for this feature is: [#155642]
+
+[#155642]: https://github.com/rust-lang/rust/issues/155642
+
+------------------------
+
+The `diagnostic_on_unmatch_args` feature adds the
+`#[diagnostic::on_unmatch_args(...)]` attribute for declarative macros.
+It lets a macro definition customize diagnostics for matcher failures after all arms have been
+tried, such as incomplete invocations or trailing extra arguments.
+
+This attribute currently applies to declarative macros such as `macro_rules!` and `pub macro`.
+It is currently used for errors emitted by declarative macro matching itself; fragment parser
+errors still use their existing diagnostics.
+
+```rust,compile_fail
+#![feature(diagnostic_on_unmatch_args)]
+
+#[diagnostic::on_unmatch_args(
+    message = "invalid arguments to {This} macro invocation",
+    label = "expected a type and value here",
+    note = "this macro expects a type and a value, like `pair!(u8, 0)`",
+    note = "see <link/to/docs>",
+)]
+macro_rules! pair {
+    ($ty:ty, $value:expr) => {};
+}
+
+pair!(u8);
+```
+
+This emits output like:
+
+```text
+error: invalid arguments to pair macro invocation
+  --> example.rs:13:9
+   |
+9  | macro_rules! pair {
+   | ----------------- when calling this macro
+...
+13 | pair!(u8);
+   |         ^ expected a type and value here
+   |
+note: while trying to match `,`
+  --> example.rs:10:12
+   |
+10 |     ($ty:ty, $value:expr) => {};
+   |            ^
+   = note: this macro expects a type and a value, like `pair!(u8, 0)`
+   = note: see <link/to/docs>
+```
 "##,
         default_severity: Severity::Allow,
         warn_since: None,
@@ -7720,6 +7949,22 @@ Enable the `f16` type for IEEE 16-bit floating numbers (half precision).
         deny_since: None,
     },
     Lint {
+        label: "f32_from_f16",
+        description: r##"# `f32_from_f16`
+
+
+
+The tracking issue for this feature is: [#154005]
+
+[#154005]: https://github.com/rust-lang/rust/issues/154005
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "fd",
         description: r##"# `fd`
 
@@ -7996,6 +8241,22 @@ The tracking issue for this feature is: [#99842]
         deny_since: None,
     },
     Lint {
+        label: "float_masks",
+        description: r##"# `float_masks`
+
+
+
+The tracking issue for this feature is: [#154064]
+
+[#154064]: https://github.com/rust-lang/rust/issues/154064
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
         label: "float_minimum_maximum",
         description: r##"# `float_minimum_maximum`
 
@@ -8016,6 +8277,22 @@ The tracking issue for this feature is: [#91079]
         description: r##"# `flt2dec`
 
 This feature is internal to the Rust compiler and is not intended for general use.
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "fma4_target_feature",
+        description: r##"# `fma4_target_feature`
+
+fma4 target feature on x86.
+
+The tracking issue for this feature is: [#155233]
+
+[#155233]: https://github.com/rust-lang/rust/issues/155233
 
 ------------------------
 "##,
@@ -8905,22 +9182,6 @@ The tracking issue for this feature is: [#134821]
         deny_since: None,
     },
     Lint {
-        label: "int_lowest_highest_one",
-        description: r##"# `int_lowest_highest_one`
-
-
-
-The tracking issue for this feature is: [#145203]
-
-[#145203]: https://github.com/rust-lang/rust/issues/145203
-
-------------------------
-"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
-    Lint {
         label: "int_roundings",
         description: r##"# `int_roundings`
 
@@ -8945,6 +9206,22 @@ The tracking issue for this feature is: [#88581]
 The tracking issue for this feature is: [#99069]
 
 [#99069]: https://github.com/rust-lang/rust/issues/99069
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "integer_cast_extras",
+        description: r##"# `integer_cast_extras`
+
+
+
+The tracking issue for this feature is: [#154650]
+
+[#154650]: https://github.com/rust-lang/rust/issues/154650
 
 ------------------------
 "##,
@@ -9260,22 +9537,6 @@ The tracking issue for this feature is: [#117425]
 The tracking issue for this feature is: [#111192]
 
 [#111192]: https://github.com/rust-lang/rust/issues/111192
-
-------------------------
-"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
-    Lint {
-        label: "isolate_most_least_significant_one",
-        description: r##"# `isolate_most_least_significant_one`
-
-
-
-The tracking issue for this feature is: [#136909]
-
-[#136909]: https://github.com/rust-lang/rust/issues/136909
 
 ------------------------
 "##,
@@ -14847,7 +15108,7 @@ pub fn main() {
     foo(&1);
 
     // Use trait alias for trait objects.
-    let a: &Bar = &123;
+    let a: &dyn Bar = &123;
     println!("{:?}", a);
     let b = Box::new(456) as Box<dyn Foo>;
     println!("{:?}", b);
@@ -14883,6 +15144,38 @@ Allows for transmuting between arrays with sizes that contain generic consts.
 The tracking issue for this feature is: [#109929]
 
 [#109929]: https://github.com/rust-lang/rust/issues/109929
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "transmute_neo",
+        description: r##"# `transmute_neo`
+
+
+
+The tracking issue for this feature is: [#155079]
+
+[#155079]: https://github.com/rust-lang/rust/issues/155079
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "transmute_prefix",
+        description: r##"# `transmute_prefix`
+
+
+
+The tracking issue for this feature is: [#155079]
+
+[#155079]: https://github.com/rust-lang/rust/issues/155079
 
 ------------------------
 "##,
@@ -15180,6 +15473,22 @@ The tracking issue for this feature is: [#149488]
 The tracking issue for this feature is: [#63178]
 
 [#63178]: https://github.com/rust-lang/rust/issues/63178
+
+------------------------
+"##,
+        default_severity: Severity::Allow,
+        warn_since: None,
+        deny_since: None,
+    },
+    Lint {
+        label: "try_from_int_error_kind",
+        description: r##"# `try_from_int_error_kind`
+
+
+
+The tracking issue for this feature is: [#153978]
+
+[#153978]: https://github.com/rust-lang/rust/issues/153978
 
 ------------------------
 "##,
@@ -15542,22 +15851,6 @@ This feature has no tracking issue, and is therefore likely internal to the comp
 The tracking issue for this feature is: [#100499]
 
 [#100499]: https://github.com/rust-lang/rust/issues/100499
-
-------------------------
-"##,
-        default_severity: Severity::Allow,
-        warn_since: None,
-        deny_since: None,
-    },
-    Lint {
-        label: "uint_bit_width",
-        description: r##"# `uint_bit_width`
-
-
-
-The tracking issue for this feature is: [#142326]
-
-[#142326]: https://github.com/rust-lang/rust/issues/142326
 
 ------------------------
 "##,

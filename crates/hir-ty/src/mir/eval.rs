@@ -30,7 +30,7 @@ use rustc_ast_ir::Mutability;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{
     AliasTyKind,
-    inherent::{AdtDef, GenericArgs as _, IntoKind, Region as _, SliceLike, Ty as _},
+    inherent::{GenericArgs as _, IntoKind, Region as _, SliceLike, Ty as _},
 };
 use span::FileId;
 use stdx::never;
@@ -40,7 +40,7 @@ use triomphe::Arc;
 use crate::{
     CallableDefId, ComplexMemoryMap, InferenceResult, MemoryMap, ParamEnvAndCrate,
     consteval::{self, ConstEvalError, try_const_usize},
-    db::{HirDatabase, InternedClosure, InternedClosureId},
+    db::{HirDatabase, InternedClosureId},
     display::{ClosureStyle, DisplayTarget, HirDisplay},
     infer::PointerCast,
     layout::{Layout, LayoutError, RustcEnumVariantIdx},
@@ -731,24 +731,7 @@ impl<'db> Evaluator<'db> {
             return *r;
         }
         let (ty, proj) = pair;
-        let r = proj.projected_ty(
-            &self.infcx,
-            self.param_env.param_env,
-            ty,
-            |c, subst, f| {
-                let InternedClosure(owner, _) = c.loc(self.db);
-                let infer = InferenceResult::of(self.db, owner);
-                let (captures, _) = infer.closure_info(c);
-                let parent_subst = subst.as_closure().parent_args();
-                captures
-                    .get(f)
-                    .expect("broken closure field")
-                    .ty
-                    .get()
-                    .instantiate(self.interner(), parent_subst)
-            },
-            self.crate_id,
-        );
+        let r = proj.projected_ty(&self.infcx, self.param_env.param_env, ty, self.crate_id);
         self.projected_ty_cache.borrow_mut().insert((ty, proj), r);
         r
     }
@@ -1668,7 +1651,7 @@ impl<'db> Evaluator<'db> {
         let TyKind::Adt(adt_def, _) = ty.kind() else {
             return Ok(0);
         };
-        let AdtId::EnumId(e) = adt_def.def_id().0 else {
+        let AdtId::EnumId(e) = adt_def.def_id() else {
             return Ok(0);
         };
         match &layout.variants {
@@ -1718,7 +1701,7 @@ impl<'db> Evaluator<'db> {
             return Ok(it);
         }
         if let TyKind::Adt(adt_ef, subst) = kind
-            && let AdtId::StructId(struct_id) = adt_ef.def_id().0
+            && let AdtId::StructId(struct_id) = adt_ef.def_id()
         {
             let field_types = self.db.field_types(struct_id.into());
             if let Some(ty) =
@@ -1785,8 +1768,8 @@ impl<'db> Evaluator<'db> {
             }
             TyKind::Adt(adt_def, target_subst) => match &current_ty.kind() {
                 TyKind::Adt(current_adt_def, current_subst) => {
-                    let id = adt_def.def_id().0;
-                    let current_id = current_adt_def.def_id().0;
+                    let id = adt_def.def_id();
+                    let current_id = current_adt_def.def_id();
                     if id != current_id {
                         not_supported!("unsizing struct with different type");
                     }
@@ -2426,7 +2409,7 @@ impl<'db> Evaluator<'db> {
                         )?;
                     }
                 }
-                TyKind::Adt(adt, subst) => match adt.def_id().0 {
+                TyKind::Adt(adt, subst) => match adt.def_id() {
                     AdtId::StructId(s) => {
                         let data = s.fields(this.db);
                         let layout = this.layout(ty)?;
@@ -2544,7 +2527,7 @@ impl<'db> Evaluator<'db> {
                 let new_id = self.vtable_map.id(ty);
                 self.write_memory(addr, &new_id.to_le_bytes())?;
             }
-            TyKind::Adt(id, args) => match id.def_id().0 {
+            TyKind::Adt(id, args) => match id.def_id() {
                 AdtId::StructId(s) => {
                     for (i, (_, ty)) in self.db.field_types(s.into()).iter().enumerate() {
                         let offset = layout.fields.offset(i).bytes_usize();
@@ -3063,7 +3046,7 @@ impl<'db> Evaluator<'db> {
         }
         match ty.kind() {
             TyKind::Adt(adt_def, subst) => {
-                let id = adt_def.def_id().0;
+                let id = adt_def.def_id();
                 match id {
                     AdtId::StructId(s) => {
                         let data = StructSignature::of(self.db, s);

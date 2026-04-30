@@ -128,13 +128,11 @@ impl StructSignature {
             source_map,
         )
     }
-}
 
-impl StructSignature {
     #[inline]
     pub fn repr(&self, db: &dyn DefDatabase, id: StructId) -> Option<ReprOptions> {
         if self.flags.contains(StructFlags::HAS_REPR) {
-            AttrFlags::repr(db, id.into())
+            AttrFlags::repr_assume_has(db, id.into())
         } else {
             None
         }
@@ -202,6 +200,15 @@ impl UnionSignature {
             source_map,
         )
     }
+
+    #[inline]
+    pub fn repr(&self, db: &dyn DefDatabase, id: UnionId) -> Option<ReprOptions> {
+        if self.flags.contains(StructFlags::HAS_REPR) {
+            AttrFlags::repr_assume_has(db, id.into())
+        } else {
+            None
+        }
+    }
 }
 
 bitflags! {
@@ -211,6 +218,8 @@ bitflags! {
         const HAS_REPR = 1 << 0;
         /// Indicates whether the enum has a `#[rustc_has_incoherent_inherent_impls]` attribute.
         const RUSTC_HAS_INCOHERENT_INHERENT_IMPLS  = 1 << 1;
+        /// Whether this enum has `#[fundamental]`.
+        const FUNDAMENTAL = 1 << 2;
     }
 }
 
@@ -242,6 +251,9 @@ impl EnumSignature {
         }
         if attrs.contains(AttrFlags::HAS_REPR) {
             flags |= EnumFlags::HAS_REPR;
+        }
+        if attrs.contains(AttrFlags::FUNDAMENTAL) {
+            flags |= EnumFlags::FUNDAMENTAL;
         }
 
         let InFile { file_id, value: source } = loc.source(db);
@@ -276,7 +288,11 @@ impl EnumSignature {
 
     #[inline]
     pub fn repr(&self, db: &dyn DefDatabase, id: EnumId) -> Option<ReprOptions> {
-        if self.flags.contains(EnumFlags::HAS_REPR) { AttrFlags::repr(db, id.into()) } else { None }
+        if self.flags.contains(EnumFlags::HAS_REPR) {
+            AttrFlags::repr_assume_has(db, id.into())
+        } else {
+            None
+        }
     }
 }
 bitflags::bitflags! {
@@ -567,19 +583,20 @@ bitflags! {
         const DEFAULT = 1 << 2;
         const CONST = 1 << 3;
         const ASYNC = 1 << 4;
-        const UNSAFE = 1 << 5;
-        const HAS_VARARGS = 1 << 6;
-        const RUSTC_ALLOW_INCOHERENT_IMPL = 1 << 7;
-        const HAS_SELF_PARAM = 1 << 8;
+        const GEN = 1 << 5;
+        const UNSAFE = 1 << 6;
+        const HAS_VARARGS = 1 << 7;
+        const RUSTC_ALLOW_INCOHERENT_IMPL = 1 << 8;
+        const HAS_SELF_PARAM = 1 << 9;
         /// The `#[target_feature]` attribute is necessary to check safety (with RFC 2396),
         /// but keeping it for all functions will consume a lot of memory when there are
         /// only very few functions with it. So we only encode its existence here, and lookup
         /// it if needed.
-        const HAS_TARGET_FEATURE = 1 << 9;
-        const DEPRECATED_SAFE_2024 = 1 << 10;
-        const EXPLICIT_SAFE = 1 << 11;
-        const HAS_LEGACY_CONST_GENERICS = 1 << 12;
-        const RUSTC_INTRINSIC = 1 << 13;
+        const HAS_TARGET_FEATURE = 1 << 10;
+        const DEPRECATED_SAFE_2024 = 1 << 11;
+        const EXPLICIT_SAFE = 1 << 12;
+        const HAS_LEGACY_CONST_GENERICS = 1 << 13;
+        const RUSTC_INTRINSIC = 1 << 14;
     }
 }
 
@@ -638,6 +655,9 @@ impl FunctionSignature {
         if source.value.async_token().is_some() {
             flags.insert(FnFlags::ASYNC);
         }
+        if source.value.gen_token().is_some() {
+            flags.insert(FnFlags::GEN);
+        }
         if source.value.const_token().is_some() {
             flags.insert(FnFlags::CONST);
         }
@@ -652,9 +672,19 @@ impl FunctionSignature {
         }
 
         let name = as_name_opt(source.value.name());
-        let abi = source.value.abi().map(|abi| {
-            abi.abi_string().map_or_else(|| sym::C, |it| Symbol::intern(it.text_without_quotes()))
-        });
+        let abi = source
+            .value
+            .abi()
+            .map(|abi| {
+                abi.abi_string()
+                    .map_or_else(|| sym::C, |it| Symbol::intern(it.text_without_quotes()))
+            })
+            .or_else(|| match loc.container {
+                ItemContainerId::ExternBlockId(extern_block) => extern_block_abi(db, extern_block),
+                ItemContainerId::ModuleId(_)
+                | ItemContainerId::ImplId(_)
+                | ItemContainerId::TraitId(_) => None,
+            });
         let (store, source_map, generic_params, params, ret_type, self_param, variadic) =
             lower_function(db, module, source, id);
         if self_param {
@@ -701,6 +731,10 @@ impl FunctionSignature {
         self.flags.contains(FnFlags::ASYNC)
     }
 
+    pub fn is_gen(&self) -> bool {
+        self.flags.contains(FnFlags::GEN)
+    }
+
     pub fn is_unsafe(&self) -> bool {
         self.flags.contains(FnFlags::UNSAFE)
     }
@@ -738,15 +772,7 @@ impl FunctionSignature {
         let data = FunctionSignature::of(db, id);
         data.flags.contains(FnFlags::RUSTC_INTRINSIC)
             // Keep this around for a bit until extern "rustc-intrinsic" abis are no longer used
-            || match &data.abi {
-                Some(abi) => *abi == sym::rust_dash_intrinsic,
-                None => match id.lookup(db).container {
-                    ItemContainerId::ExternBlockId(block) => {
-                        block.abi(db) == Some(sym::rust_dash_intrinsic)
-                    }
-                    _ => false,
-                },
-            }
+            || data.abi.as_ref().is_some_and(|abi| *abi == sym::rust_dash_intrinsic)
     }
 }
 
