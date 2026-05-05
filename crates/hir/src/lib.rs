@@ -196,7 +196,7 @@ use {
     hir_def::expr_store::path::Path,
     hir_expand::{
         name::AsName,
-        span_map::{ExpansionSpanMap, RealSpanMap, SpanMap, SpanMapRef},
+        span_map::{ExpansionSpanMap, RealSpanMap, SpanMap},
     },
 };
 
@@ -1120,7 +1120,7 @@ fn macro_call_diagnostics<'db>(
     let Some(e) = db.parse_macro_expansion_error(macro_call_id) else {
         return;
     };
-    let ValueResult { value: parse_errors, err } = &*e;
+    let ValueResult { value: parse_errors, err } = e;
     if let Some(err) = err {
         let loc = db.lookup_intern_macro_call(macro_call_id);
         let file_id = loc.kind.file_id();
@@ -1436,7 +1436,7 @@ impl Field {
         Type::new(db, var_id, ty)
     }
 
-    pub fn layout(&self, db: &dyn HirDatabase) -> Result<Layout, LayoutError> {
+    pub fn layout<'db>(&self, db: &'db dyn HirDatabase) -> Result<Layout<'db>, LayoutError> {
         db.layout_of_ty(
             self.ty(db).ty.store(),
             param_env_from_has_crate(
@@ -1696,7 +1696,7 @@ impl Enum {
         self.variants(db).iter().any(|v| !matches!(v.kind(db), StructKind::Unit))
     }
 
-    pub fn layout(self, db: &dyn HirDatabase) -> Result<Layout, LayoutError> {
+    pub fn layout<'db>(self, db: &'db dyn HirDatabase) -> Result<Layout<'db>, LayoutError> {
         Adt::from(self).layout(db)
     }
 
@@ -1783,7 +1783,7 @@ impl EnumVariant {
         db.const_eval_discriminant(self.into())
     }
 
-    pub fn layout(&self, db: &dyn HirDatabase) -> Result<Layout, LayoutError> {
+    pub fn layout<'db>(&self, db: &'db dyn HirDatabase) -> Result<Layout<'db>, LayoutError> {
         let parent_enum = self.parent_enum(db);
         let parent_layout = parent_enum.layout(db)?;
         Ok(match &parent_layout.0.variants {
@@ -1866,7 +1866,7 @@ impl Adt {
         has_non_default_type_params(db, self.into())
     }
 
-    pub fn layout(self, db: &dyn HirDatabase) -> Result<Layout, LayoutError> {
+    pub fn layout<'db>(self, db: &'db dyn HirDatabase) -> Result<Layout<'db>, LayoutError> {
         let interner = DbInterner::new_no_crate(db);
         let adt_id = AdtId::from(self);
         let args = GenericArgs::for_item_with_defaults(interner, adt_id.into(), |_, id, _| {
@@ -2121,6 +2121,7 @@ impl DefWithBody {
             return;
         };
         let krate = self.module(db).id.krate(db);
+        let env = body_param_env_from_has_crate(db, id);
 
         let (body, source_map) = Body::with_source_map(db, id);
         let sig_source_map = match self {
@@ -2144,34 +2145,14 @@ impl DefWithBody {
 
         let infer = InferenceResult::of(db, id);
         for d in infer.diagnostics() {
-            acc.extend(AnyDiagnostic::inference_diagnostic(db, id, d, source_map, sig_source_map));
-        }
-
-        for (pat_or_expr, mismatch) in infer.type_mismatches() {
-            let expr_or_pat = match pat_or_expr {
-                ExprOrPatId::ExprId(expr) => source_map.expr_syntax(expr).map(Either::Left),
-                ExprOrPatId::PatId(pat) => source_map.pat_syntax(pat).map(Either::Right),
-            };
-            let expr_or_pat = match expr_or_pat {
-                Ok(Either::Left(expr)) => expr,
-                Ok(Either::Right(InFile { file_id, value: pat })) => {
-                    // cast from Either<Pat, SelfParam> -> Either<_, Pat>
-                    let Some(ptr) = AstPtr::try_from_raw(pat.syntax_node_ptr()) else {
-                        continue;
-                    };
-                    InFile { file_id, value: ptr }
-                }
-                Err(SyntheticSyntax) => continue,
-            };
-
-            acc.push(
-                TypeMismatch {
-                    expr_or_pat,
-                    expected: Type::new(db, id, mismatch.expected.as_ref()),
-                    actual: Type::new(db, id, mismatch.actual.as_ref()),
-                }
-                .into(),
-            );
+            acc.extend(AnyDiagnostic::inference_diagnostic(
+                db,
+                id,
+                d,
+                source_map,
+                sig_source_map,
+                env,
+            ));
         }
 
         let missing_unsafe = hir_ty::diagnostics::missing_unsafe(db, id);
@@ -2211,7 +2192,7 @@ impl DefWithBody {
 
         if let Ok(borrowck_results) = db.borrowck(id) {
             for borrowck_result in borrowck_results.iter() {
-                let mir_body = &borrowck_result.mir_body;
+                let mir_body = borrowck_result.mir_body(db);
                 for moof in &borrowck_result.moved_out_of_ref {
                     let span: InFile<SyntaxNodePtr> = match moof.span {
                         mir::MirSpan::ExprId(e) => match source_map.expr_syntax(e) {
@@ -4633,13 +4614,12 @@ impl GenericParam {
             GenericParam::ConstParam(_) => return None,
             GenericParam::LifetimeParam(it) => it.id.parent,
         };
-        let generics = hir_ty::generics::generics(db, parent);
         let index = match self {
-            GenericParam::TypeParam(it) => generics.type_or_const_param_idx(it.id.into())?,
+            GenericParam::TypeParam(it) => hir_ty::type_or_const_param_idx(db, it.id.into()),
             GenericParam::ConstParam(_) => return None,
-            GenericParam::LifetimeParam(it) => generics.lifetime_idx(it.id)?,
+            GenericParam::LifetimeParam(it) => hir_ty::lifetime_param_idx(db, it.id),
         };
-        db.variances_of(parent).get(index).map(Into::into)
+        db.variances_of(parent).get(index as usize).map(Into::into)
     }
 }
 
@@ -4711,8 +4691,8 @@ impl TypeParam {
     pub fn ty(self, db: &dyn HirDatabase) -> Type<'_> {
         let resolver = self.id.parent().resolver(db);
         let interner = DbInterner::new_no_crate(db);
-        let index = hir_ty::param_idx(db, self.id.into()).unwrap();
-        let ty = Ty::new_param(interner, self.id, index as u32);
+        let index = hir_ty::type_or_const_param_idx(db, self.id.into());
+        let ty = Ty::new_param(interner, self.id, index);
         Type::new_with_resolver_inner(db, &resolver, ty)
     }
 
@@ -4812,9 +4792,9 @@ impl ConstParam {
 }
 
 fn generic_arg_from_param(db: &dyn HirDatabase, id: TypeOrConstParamId) -> Option<GenericArg<'_>> {
-    let local_idx = hir_ty::param_idx(db, id)?;
+    let local_idx = hir_ty::type_or_const_param_idx(db, id);
     let defaults = db.generic_defaults(id.parent);
-    let ty = defaults.get(local_idx)?;
+    let ty = defaults.get(local_idx as usize)?;
     // FIXME: This shouldn't be `instantiate_identity()`, we shouldn't leak `TyKind::Param`s.
     Some(ty.instantiate_identity())
 }
@@ -5719,21 +5699,15 @@ impl<'db> Type<'db> {
     /// This function is used in `.await` syntax completion.
     pub fn into_future_output(&self, db: &'db dyn HirDatabase) -> Option<Type<'db>> {
         let lang_items = hir_def::lang_item::lang_items(db, self.env.krate);
-        let trait_ = lang_items
-            .IntoFutureIntoFuture
-            .and_then(|into_future_fn| {
-                let assoc_item = as_assoc_item(db, AssocItem::Function, into_future_fn)?;
-                let into_future_trait = assoc_item.container_or_implemented_trait(db)?;
-                Some(into_future_trait.id)
-            })
-            .or(lang_items.Future)?;
+        let (trait_, output_assoc_type) = lang_items
+            .IntoFuture
+            .zip(lang_items.IntoFutureOutput)
+            .or(lang_items.Future.zip(lang_items.FutureOutput))?;
 
         if !traits::implements_trait_unique(self.ty, db, self.env, trait_) {
             return None;
         }
 
-        let output_assoc_type =
-            trait_.trait_items(db).associated_type_by_name(&Name::new_symbol_root(sym::Output))?;
         self.normalize_trait_assoc_type(db, &[], output_assoc_type.into())
     }
 
@@ -5747,10 +5721,7 @@ impl<'db> Type<'db> {
     /// This does **not** resolve `IntoIterator`, only `Iterator`.
     pub fn iterator_item(self, db: &'db dyn HirDatabase) -> Option<Type<'db>> {
         let lang_items = hir_def::lang_item::lang_items(db, self.env.krate);
-        let iterator_trait = lang_items.Iterator?;
-        let iterator_item = iterator_trait
-            .trait_items(db)
-            .associated_type_by_name(&Name::new_symbol_root(sym::Item))?;
+        let iterator_item = lang_items.IteratorItem?;
         self.normalize_trait_assoc_type(db, &[], iterator_item.into())
     }
 
@@ -5765,19 +5736,13 @@ impl<'db> Type<'db> {
     /// Resolves the projection `<Self as IntoIterator>::IntoIter` and returns the resulting type
     pub fn into_iterator_iter(self, db: &'db dyn HirDatabase) -> Option<Type<'db>> {
         let lang_items = hir_def::lang_item::lang_items(db, self.env.krate);
-        let trait_ = lang_items.IntoIterIntoIter.and_then(|into_iter_fn| {
-            let assoc_item = as_assoc_item(db, AssocItem::Function, into_iter_fn)?;
-            let into_iter_trait = assoc_item.container_or_implemented_trait(db)?;
-            Some(into_iter_trait.id)
-        })?;
+        let trait_ = lang_items.IntoIterator?;
 
         if !traits::implements_trait_unique(self.ty, db, self.env, trait_) {
             return None;
         }
 
-        let into_iter_assoc_type = trait_
-            .trait_items(db)
-            .associated_type_by_name(&Name::new_symbol_root(sym::IntoIter))?;
+        let into_iter_assoc_type = lang_items.IntoIterIntoIterType?;
         self.normalize_trait_assoc_type(db, &[], into_iter_assoc_type.into())
     }
 
@@ -6531,7 +6496,7 @@ impl<'db> Type<'db> {
             .collect()
     }
 
-    pub fn layout(&self, db: &'db dyn HirDatabase) -> Result<Layout, LayoutError> {
+    pub fn layout(&self, db: &'db dyn HirDatabase) -> Result<Layout<'db>, LayoutError> {
         db.layout_of_ty(self.ty.store(), self.env.store())
             .map(|layout| Layout(layout, db.target_data_layout(self.env.krate).unwrap()))
     }
@@ -6703,9 +6668,9 @@ impl<'db> Callable<'db> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Layout(Arc<TyLayout>, Arc<TargetDataLayout>);
+pub struct Layout<'db>(Arc<TyLayout>, &'db TargetDataLayout);
 
-impl Layout {
+impl<'db> Layout<'db> {
     pub fn size(&self) -> u64 {
         self.0.size.bytes()
     }
@@ -6715,7 +6680,7 @@ impl Layout {
     }
 
     pub fn niches(&self) -> Option<u128> {
-        Some(self.0.largest_niche?.available(&*self.1))
+        Some(self.0.largest_niche?.available(self.1))
     }
 
     pub fn field_offset(&self, field: Field) -> Option<u64> {
@@ -6804,7 +6769,7 @@ impl Layout {
         let tag_size =
             if let layout::Variants::Multiple { tag, tag_encoding, .. } = &self.0.variants {
                 match tag_encoding {
-                    TagEncoding::Direct => tag.size(&*self.1).bytes_usize(),
+                    TagEncoding::Direct => tag.size(self.1).bytes_usize(),
                     TagEncoding::Niche { .. } => 0,
                 }
             } else {
@@ -6933,6 +6898,33 @@ pub trait HasVisibility {
     fn is_visible_from(&self, db: &dyn HirDatabase, module: Module) -> bool {
         let vis = self.visibility(db);
         vis.is_visible_from(db, module.id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PredicatePolarity {
+    /// `T: Trait`
+    Positive,
+    /// `T: !Trait`
+    Negative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitPredicate<'db> {
+    inner: hir_ty::next_solver::TraitPredicate<'db>,
+    env: ParamEnvAndCrate<'db>,
+}
+
+impl<'db> TraitPredicate<'db> {
+    pub fn polarity(&self) -> PredicatePolarity {
+        match self.inner.polarity {
+            rustc_type_ir::PredicatePolarity::Positive => PredicatePolarity::Positive,
+            rustc_type_ir::PredicatePolarity::Negative => PredicatePolarity::Negative,
+        }
+    }
+
+    pub fn trait_ref(&self) -> TraitRef<'db> {
+        TraitRef { env: self.env, trait_ref: self.inner.trait_ref }
     }
 }
 
@@ -7344,10 +7336,8 @@ fn has_non_default_type_params(db: &dyn HirDatabase, generic_def: GenericDefId) 
         .filter(|(_, param)| matches!(param, TypeOrConstParamData::TypeParamData(_)))
         .map(|(local_id, _)| TypeOrConstParamId { parent: generic_def, local_id })
         .any(|param| {
-            let Some(param) = hir_ty::param_idx(db, param) else {
-                return false;
-            };
-            defaults.get(param).is_none()
+            let param = hir_ty::type_or_const_param_idx(db, param);
+            defaults.get(param as usize).is_none()
         })
 }
 

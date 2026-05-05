@@ -40,7 +40,9 @@ use ide_db::{
 use syntax::ast::HasGenericParams;
 use syntax::{
     AstNode, SmolStr, SyntaxElement, SyntaxKind, T, TextRange, ToSmolStr,
-    ast::{self, HasGenericArgs, HasTypeBounds, edit_in_place::AttrsOwnerEdit, make},
+    ast::{
+        self, HasGenericArgs, HasTypeBounds, edit::AstNodeEdit, edit_in_place::AttrsOwnerEdit, make,
+    },
     format_smolstr, ted,
 };
 
@@ -59,7 +61,7 @@ enum ImplCompletionKind {
 
 pub(crate) fn complete_trait_impl_const(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     name: &Option<ast::Name>,
 ) -> Option<()> {
     complete_trait_impl_name(acc, ctx, name, ImplCompletionKind::Const)
@@ -67,7 +69,7 @@ pub(crate) fn complete_trait_impl_const(
 
 pub(crate) fn complete_trait_impl_type_alias(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     name: &Option<ast::Name>,
 ) -> Option<()> {
     complete_trait_impl_name(acc, ctx, name, ImplCompletionKind::TypeAlias)
@@ -75,7 +77,7 @@ pub(crate) fn complete_trait_impl_type_alias(
 
 pub(crate) fn complete_trait_impl_fn(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     name: &Option<ast::Name>,
 ) -> Option<()> {
     complete_trait_impl_name(acc, ctx, name, ImplCompletionKind::Fn)
@@ -83,7 +85,7 @@ pub(crate) fn complete_trait_impl_fn(
 
 fn complete_trait_impl_name(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     name: &Option<ast::Name>,
     kind: ImplCompletionKind,
 ) -> Option<()> {
@@ -122,7 +124,7 @@ fn complete_trait_impl_name(
 
 pub(crate) fn complete_trait_impl_item_by_name(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     path_ctx: &PathCompletionCtx<'_>,
     name_ref: &Option<ast::NameRef>,
     impl_: &Option<ast::Impl>,
@@ -149,7 +151,7 @@ pub(crate) fn complete_trait_impl_item_by_name(
 
 fn complete_trait_impl(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     kind: ImplCompletionKind,
     replacement_range: TextRange,
     impl_def: &ast::Impl,
@@ -178,7 +180,7 @@ fn complete_trait_impl(
 
 fn add_function_impl(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     replacement_range: TextRange,
     func: hir::Function,
     impl_def: hir::Impl,
@@ -198,7 +200,7 @@ fn add_function_impl(
 
 fn add_function_impl_(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     replacement_range: TextRange,
     func: hir::Function,
     impl_def: hir::Impl,
@@ -233,13 +235,14 @@ fn add_function_impl_(
             get_transformed_fn(ctx, source.value, impl_def, async_sugaring)
     {
         let function_decl = function_declaration(ctx, &transformed_fn, source.file_id.macro_file());
+        let ws = if function_decl.contains('\n') { "\n" } else { " " };
         match ctx.config.snippet_cap {
             Some(cap) => {
-                let snippet = format!("{function_decl} {{\n    $0\n}}");
+                let snippet = format!("{function_decl}{ws}{{\n    $0\n}}");
                 item.snippet_edit(cap, TextEdit::replace(replacement_range, snippet));
             }
             None => {
-                let header = format!("{function_decl} {{");
+                let header = format!("{function_decl}{ws}{{");
                 item.text_edit(TextEdit::replace(replacement_range, header));
             }
         };
@@ -257,7 +260,7 @@ enum AsyncSugaring {
 
 /// Transform a relevant associated item to inline generics from the impl, remove attrs and docs, etc.
 fn get_transformed_assoc_item(
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     assoc_item: ast::AssocItem,
     impl_def: hir::Impl,
 ) -> Option<ast::AssocItem> {
@@ -281,7 +284,7 @@ fn get_transformed_assoc_item(
 
 /// Transform a relevant associated item to inline generics from the impl, remove attrs and docs, etc.
 fn get_transformed_fn(
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     fn_: ast::Fn,
     impl_def: hir::Impl,
     async_: AsyncSugaring,
@@ -296,7 +299,7 @@ fn get_transformed_fn(
         ctx.sema.source(impl_def)?.value,
     );
 
-    let fn_ = fn_.clone_for_update();
+    let fn_ = fn_.reset_indent();
     // FIXME: Paths in nested macros are not handled well. See
     // `macro_generated_assoc_item2` test.
     let fn_ = ast::Fn::cast(transform.apply(fn_.syntax()))?;
@@ -363,7 +366,7 @@ fn get_transformed_fn(
 
 fn add_type_alias_impl(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     replacement_range: TextRange,
     type_alias: hir::TypeAlias,
     impl_def: hir::Impl,
@@ -444,7 +447,7 @@ fn add_type_alias_impl(
 
 fn add_const_impl(
     acc: &mut Completions,
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     replacement_range: TextRange,
     const_: hir::Const,
     impl_def: hir::Impl,
@@ -486,13 +489,13 @@ fn add_const_impl(
 }
 
 fn make_const_compl_syntax(
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     const_: &ast::Const,
     macro_file: Option<MacroCallId>,
 ) -> SmolStr {
     let const_ = if let Some(macro_file) = macro_file {
         let span_map = ctx.db.expansion_span_map(macro_file);
-        prettify_macro_expansion(ctx.db, const_.syntax().clone(), &span_map, ctx.krate.into())
+        prettify_macro_expansion(ctx.db, const_.syntax().clone(), span_map, ctx.krate.into())
     } else {
         const_.syntax().clone()
     };
@@ -514,13 +517,13 @@ fn make_const_compl_syntax(
 }
 
 fn function_declaration(
-    ctx: &CompletionContext<'_>,
+    ctx: &CompletionContext<'_, '_>,
     node: &ast::Fn,
     macro_file: Option<MacroCallId>,
 ) -> String {
     let node = if let Some(macro_file) = macro_file {
         let span_map = ctx.db.expansion_span_map(macro_file);
-        prettify_macro_expansion(ctx.db, node.syntax().clone(), &span_map, ctx.krate.into())
+        prettify_macro_expansion(ctx.db, node.syntax().clone(), span_map, ctx.krate.into())
     } else {
         node.syntax().clone()
     };
@@ -1256,7 +1259,7 @@ trait SomeTrait<T> {}
 
 trait Foo<T> {
     fn function()
-        where Self: SomeTrait<T>;
+    where Self: SomeTrait<T>;
 }
 struct Bar;
 
@@ -1269,13 +1272,14 @@ trait SomeTrait<T> {}
 
 trait Foo<T> {
     fn function()
-        where Self: SomeTrait<T>;
+    where Self: SomeTrait<T>;
 }
 struct Bar;
 
 impl Foo<u32> for Bar {
     fn function()
-        where Self: SomeTrait<u32> {
+where Self: SomeTrait<u32>
+{
     $0
 }
 }

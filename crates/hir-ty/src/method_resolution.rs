@@ -25,7 +25,6 @@ use hir_def::{
     signatures::{ConstSignature, FunctionSignature},
     unstable_features::UnstableFeatures,
 };
-use intern::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{
     TypeVisitableExt,
@@ -224,8 +223,8 @@ impl<'db> InferenceTable<'db> {
     pub(super) fn lookup_method_for_operator(
         &self,
         cause: ObligationCause,
-        method_name: Symbol,
         trait_def_id: TraitId,
+        method_item: FunctionId,
         self_ty: Ty<'db>,
         opt_rhs_ty: Option<Ty<'db>>,
         treat_opaques: TreatNotYetDefinedOpaques,
@@ -256,7 +255,7 @@ impl<'db> InferenceTable<'db> {
 
         let obligation = Obligation::new(
             self.interner(),
-            cause.clone(),
+            cause,
             self.param_env,
             TraitRef::new_from_args(self.interner(), trait_def_id.into(), args),
         );
@@ -278,13 +277,6 @@ impl<'db> InferenceTable<'db> {
         // Trait must have a method named `m_name` and it should not have
         // type parameters or early-bound regions.
         let interner = self.interner();
-        // We use `Ident::with_dummy_span` since no built-in operator methods have
-        // any macro-specific hygiene, so the span's context doesn't really matter.
-        let Some(method_item) =
-            trait_def_id.trait_items(self.db).method_by_name(&Name::new_symbol_root(method_name))
-        else {
-            panic!("expected associated item for operator trait")
-        };
 
         let def_id = method_item;
 
@@ -316,7 +308,7 @@ impl<'db> InferenceTable<'db> {
         let bounds = GenericPredicates::query_all(self.db, method_item.into());
         let bounds = clauses_as_obligations(
             bounds.iter_instantiated(interner, args.as_slice()),
-            ObligationCause::new(),
+            cause,
             self.param_env,
         );
 
@@ -330,7 +322,7 @@ impl<'db> InferenceTable<'db> {
         for ty in fn_sig.inputs_and_output {
             obligations.push(Obligation::new(
                 interner,
-                obligation.cause.clone(),
+                obligation.cause,
                 self.param_env,
                 Binder::dummy(PredicateKind::Clause(ClauseKind::WellFormed(ty.into()))),
             ));

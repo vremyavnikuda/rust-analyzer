@@ -15,12 +15,15 @@ use hir_def::{
 };
 use hir_expand::{HirFileId, InFile, mod_path::ModPath, name::Name};
 use hir_ty::{
-    CastError, InferenceDiagnostic, InferenceTyDiagnosticSource, PathGenericsSource,
-    PathLoweringDiagnostic, TyLoweringDiagnostic, TyLoweringDiagnosticKind,
+    CastError, InferenceDiagnostic, InferenceTyDiagnosticSource, ParamEnvAndCrate,
+    PathGenericsSource, PathLoweringDiagnostic, TyLoweringDiagnostic, TyLoweringDiagnosticKind,
     db::HirDatabase,
     diagnostics::{BodyValidationDiagnostic, UnsafetyReason},
     display::{DisplayTarget, HirDisplay},
+    next_solver::DbInterner,
+    solver_errors::SolverDiagnosticKind,
 };
+use stdx::{impl_from, never};
 use syntax::{
     AstNode, AstPtr, SyntaxError, SyntaxNodePtr, TextRange,
     ast::{self, HasGenericArgs},
@@ -28,13 +31,56 @@ use syntax::{
 };
 use triomphe::Arc;
 
-use crate::{AssocItem, Field, Function, GenericDef, Local, Trait, Type};
+use crate::{AssocItem, Field, Function, GenericDef, Local, Trait, Type, Variant};
 
 pub use hir_def::VariantId;
 pub use hir_ty::{
     GenericArgsProhibitedReason, IncorrectGenericsLenKind,
     diagnostics::{CaseType, IncorrectCase},
 };
+
+#[derive(Debug, Clone)]
+pub enum SpanAst {
+    Expr(ast::Expr),
+    Pat(ast::Pat),
+    Type(ast::Type),
+}
+const _: () = {
+    use syntax::ast::*;
+    impl_from!(Expr, Pat, Type for SpanAst);
+};
+
+impl From<Either<ast::Expr, ast::Pat>> for SpanAst {
+    fn from(value: Either<ast::Expr, ast::Pat>) -> Self {
+        match value {
+            Either::Left(it) => it.into(),
+            Either::Right(it) => it.into(),
+        }
+    }
+}
+
+impl ast::AstNode for SpanAst {
+    fn can_cast(kind: syntax::SyntaxKind) -> bool {
+        ast::Expr::can_cast(kind) || ast::Pat::can_cast(kind) || ast::Type::can_cast(kind)
+    }
+
+    fn cast(syntax: syntax::SyntaxNode) -> Option<Self> {
+        ast::Expr::cast(syntax.clone())
+            .map(SpanAst::Expr)
+            .or_else(|| ast::Pat::cast(syntax.clone()).map(SpanAst::Pat))
+            .or_else(|| ast::Type::cast(syntax).map(SpanAst::Type))
+    }
+
+    fn syntax(&self) -> &syntax::SyntaxNode {
+        match self {
+            SpanAst::Expr(it) => it.syntax(),
+            SpanAst::Pat(it) => it.syntax(),
+            SpanAst::Type(it) => it.syntax(),
+        }
+    }
+}
+
+pub type SpanSyntax = InFile<AstPtr<SpanAst>>;
 
 macro_rules! diagnostics {
     ($AnyDiagnostic:ident <$db:lifetime> -> $($diag:ident $(<$lt:lifetime>)?,)*) => {
@@ -81,11 +127,14 @@ diagnostics![AnyDiagnostic<'db> ->
     NonExhaustiveLet,
     NonExhaustiveRecordExpr,
     NoSuchField,
+    MismatchedArrayPatLen,
+    DuplicateField,
     PatternArgInExternFn,
     PrivateAssocItem,
     PrivateField,
     RemoveTrailingReturn,
     RemoveUnnecessaryElse,
+    UnusedMustUse<'db>,
     ReplaceFilterMapNextWithFindMap,
     TraitImplIncorrectSafety,
     TraitImplMissingAssocItems,
@@ -112,6 +161,8 @@ diagnostics![AnyDiagnostic<'db> ->
     MissingLifetime,
     ElidedLifetimesInPath,
     TypeMustBeKnown<'db>,
+    UnionExprMustHaveExactlyOneField,
+    UnimplementedTrait<'db>,
 ];
 
 #[derive(Debug)]
@@ -218,6 +269,12 @@ pub struct NoSuchField {
 }
 
 #[derive(Debug)]
+pub struct DuplicateField {
+    pub field: InFile<AstPtr<Either<ast::RecordExprField, ast::RecordPatField>>>,
+    pub variant: Variant,
+}
+
+#[derive(Debug)]
 pub struct PrivateAssocItem {
     pub expr_or_pat: InFile<ExprOrPatPtr>,
     pub item: AssocItem,
@@ -228,6 +285,14 @@ pub struct MismatchedTupleStructPatArgCount {
     pub expr_or_pat: InFile<ExprOrPatPtr>,
     pub expected: usize,
     pub found: usize,
+}
+
+#[derive(Debug)]
+pub struct MismatchedArrayPatLen {
+    pub pat: InFile<ExprOrPatPtr>,
+    pub expected: u128,
+    pub found: u128,
+    pub has_rest: bool,
 }
 
 #[derive(Debug)]
@@ -397,6 +462,12 @@ pub struct RemoveUnnecessaryElse {
 }
 
 #[derive(Debug)]
+pub struct UnusedMustUse<'db> {
+    pub expr: InFile<ExprOrPatPtr>,
+    pub message: Option<&'db str>,
+}
+
+#[derive(Debug)]
 pub struct CastToUnsized<'db> {
     pub expr: InFile<ExprOrPatPtr>,
     pub cast_ty: Type<'db>,
@@ -455,7 +526,7 @@ pub struct ElidedLifetimesInPath {
 
 #[derive(Debug)]
 pub struct TypeMustBeKnown<'db> {
-    pub at_point: InFile<AstPtr<Either<ast::Type, Either<ast::Expr, ast::Pat>>>>,
+    pub at_point: SpanSyntax,
     pub top_term: Option<Either<Type<'db>, String>>,
 }
 
@@ -489,6 +560,11 @@ pub struct GenericDefaultRefersToSelf {
 }
 
 #[derive(Debug)]
+pub struct UnionExprMustHaveExactlyOneField {
+    pub expr: InFile<ExprOrPatPtr>,
+}
+
+#[derive(Debug)]
 pub struct InvalidLhsOfAssignment {
     pub lhs: InFile<AstPtr<Either<ast::Expr, ast::Pat>>>,
 }
@@ -498,10 +574,17 @@ pub struct PatternArgInExternFn {
     pub node: InFile<AstPtr<ast::Pat>>,
 }
 
+#[derive(Debug)]
+pub struct UnimplementedTrait<'db> {
+    pub span: SpanSyntax,
+    pub trait_predicate: crate::TraitPredicate<'db>,
+    pub root_trait_predicate: Option<crate::TraitPredicate<'db>>,
+}
+
 impl<'db> AnyDiagnostic<'db> {
     pub(crate) fn body_validation_diagnostic(
         db: &'db dyn HirDatabase,
-        diagnostic: BodyValidationDiagnostic,
+        diagnostic: BodyValidationDiagnostic<'db>,
         source_map: &hir_def::expr_store::BodySourceMap,
     ) -> Option<AnyDiagnostic<'db>> {
         match diagnostic {
@@ -622,6 +705,11 @@ impl<'db> AnyDiagnostic<'db> {
                     );
                 }
             }
+            BodyValidationDiagnostic::UnusedMustUse { expr, message } => {
+                if let Ok(source_ptr) = source_map.expr_syntax(expr) {
+                    return Some(UnusedMustUse { expr: source_ptr, message }.into());
+                }
+            }
         }
         None
     }
@@ -629,9 +717,10 @@ impl<'db> AnyDiagnostic<'db> {
     pub(crate) fn inference_diagnostic(
         db: &'db dyn HirDatabase,
         def: DefWithBodyId,
-        d: &InferenceDiagnostic,
+        d: &'db InferenceDiagnostic,
         source_map: &hir_def::expr_store::BodySourceMap,
         sig_map: &hir_def::expr_store::ExpressionStoreSourceMap,
+        env: ParamEnvAndCrate<'db>,
     ) -> Option<AnyDiagnostic<'db>> {
         let expr_syntax = |expr| {
             source_map
@@ -655,6 +744,18 @@ impl<'db> AnyDiagnostic<'db> {
             ExprOrPatId::ExprId(expr) => expr_syntax(expr),
             ExprOrPatId::PatId(pat) => pat_syntax(pat),
         };
+        let span_syntax = |span| match span {
+            hir_ty::Span::ExprId(idx) => expr_syntax(idx).map(|it| it.upcast()),
+            hir_ty::Span::PatId(idx) => pat_syntax(idx).map(|it| it.upcast()),
+            hir_ty::Span::TypeRefId(idx) => type_syntax(idx).map(|it| it.upcast()),
+            hir_ty::Span::BindingId(idx) => {
+                pat_syntax(source_map.patterns_for_binding(idx)[0]).map(|it| it.upcast())
+            }
+            hir_ty::Span::Dummy => {
+                never!("should never create a diagnostic for dummy spans");
+                None
+            }
+        };
         Some(match d {
             &InferenceDiagnostic::NoSuchField { field: expr, private, variant } => {
                 let expr_or_pat = match expr {
@@ -665,6 +766,19 @@ impl<'db> AnyDiagnostic<'db> {
                 };
                 let private = private.map(|id| Field { id, parent: variant.into() });
                 NoSuchField { field: expr_or_pat, private, variant }.into()
+            }
+            &InferenceDiagnostic::MismatchedArrayPatLen { pat, expected, found, has_rest } => {
+                let pat = pat_syntax(pat)?.map(Into::into);
+                MismatchedArrayPatLen { pat, expected, found, has_rest }.into()
+            }
+            &InferenceDiagnostic::DuplicateField { field: expr, variant } => {
+                let expr_or_pat = match expr {
+                    ExprOrPatId::ExprId(expr) => {
+                        source_map.field_syntax(expr).map(AstPtr::wrap_left)
+                    }
+                    ExprOrPatId::PatId(pat) => source_map.pat_field_syntax(pat),
+                };
+                DuplicateField { field: expr_or_pat, variant: variant.into() }.into()
             }
             &InferenceDiagnostic::MismatchedArgCount { call_expr, expected, found } => {
                 MismatchedArgCount { call_expr: expr_syntax(call_expr)?, expected, found }.into()
@@ -830,14 +944,7 @@ impl<'db> AnyDiagnostic<'db> {
                 InvalidLhsOfAssignment { lhs }.into()
             }
             &InferenceDiagnostic::TypeMustBeKnown { at_point, ref top_term } => {
-                let at_point = match at_point {
-                    hir_ty::Span::ExprId(idx) => expr_syntax(idx)?.map(|it| it.wrap_right()),
-                    hir_ty::Span::PatId(idx) => pat_syntax(idx)?.map(|it| it.wrap_right()),
-                    hir_ty::Span::TypeRefId(idx) => type_syntax(idx)?.map(|it| it.wrap_left()),
-                    hir_ty::Span::Dummy => unreachable!(
-                        "should never create TypeMustBeKnown diagnostic for dummy spans"
-                    ),
-                };
+                let at_point = span_syntax(at_point)?;
                 let top_term = top_term.as_ref().map(|top_term| match top_term.as_ref().kind() {
                     rustc_type_ir::GenericArgKind::Type(ty) => Either::Left(Type {
                         ty,
@@ -852,6 +959,43 @@ impl<'db> AnyDiagnostic<'db> {
                     }
                 });
                 TypeMustBeKnown { at_point, top_term }.into()
+            }
+            &InferenceDiagnostic::UnionExprMustHaveExactlyOneField { expr } => {
+                let expr = expr_syntax(expr)?;
+                UnionExprMustHaveExactlyOneField { expr }.into()
+            }
+            InferenceDiagnostic::TypeMismatch { node, expected, found } => {
+                let expr_or_pat = expr_or_pat_syntax(*node)?;
+                TypeMismatch {
+                    expr_or_pat,
+                    expected: Type { env, ty: expected.as_ref() },
+                    actual: Type { env, ty: found.as_ref() },
+                }
+                .into()
+            }
+            InferenceDiagnostic::SolverDiagnostic(d) => {
+                let span = span_syntax(d.span)?;
+                Self::solver_diagnostic(db, &d.kind, span, env)?
+            }
+        })
+    }
+
+    fn solver_diagnostic(
+        db: &'db dyn HirDatabase,
+        d: &'db SolverDiagnosticKind,
+        span: SpanSyntax,
+        env: ParamEnvAndCrate<'db>,
+    ) -> Option<AnyDiagnostic<'db>> {
+        let interner = DbInterner::new_no_crate(db);
+        Some(match d {
+            SolverDiagnosticKind::TraitUnimplemented { trait_predicate, root_trait_predicate } => {
+                let trait_predicate =
+                    crate::TraitPredicate { inner: trait_predicate.get(interner), env };
+                let root_trait_predicate =
+                    root_trait_predicate.as_ref().map(|root_trait_predicate| {
+                        crate::TraitPredicate { inner: root_trait_predicate.get(interner), env }
+                    });
+                UnimplementedTrait { span, trait_predicate, root_trait_predicate }.into()
             }
         })
     }

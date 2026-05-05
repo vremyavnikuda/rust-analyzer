@@ -1036,3 +1036,36 @@ fn f() {
     "#,
     );
 }
+
+#[test]
+fn regression_22270() {
+    check_no_mismatches(
+        r#"
+fn a() {}
+fn b() {}
+
+fn foo<T, const N: usize>(x: [T; N]) -> Vec<T> {
+    loop {}
+}
+
+fn bar() {
+    foo([a, b]);
+}
+    "#,
+    );
+}
+
+#[test]
+fn async_fn_ret() {
+    check_no_mismatches(
+        r#"
+//- minicore: coerce_unsized, unsize, future, index, slice, range
+async fn foo(a: &[i32]) -> &[i32] {
+    if true {
+        return &[];
+    }
+    &a[..0]
+}
+    "#,
+    );
+}

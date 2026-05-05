@@ -29,7 +29,7 @@ use crate::{AssistContext, AssistId, Assists};
 //     println!("foo");
 // }
 // ```
-pub(crate) fn unwrap_branch(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
+pub(crate) fn unwrap_branch(acc: &mut Assists, ctx: &AssistContext<'_, '_>) -> Option<()> {
     let (editor, _) = SyntaxEditor::new(ctx.source_file().syntax().clone());
     let place = unwrap_branch_place(ctx)?;
     let target = place.syntax().text_range();
@@ -70,6 +70,11 @@ pub(crate) fn unwrap_branch(acc: &mut Assists, ctx: &AssistContext<'_>) -> Optio
                 _ => return None,
             }
         };
+        if ast::MatchArm::cast(container.parent()?).is_some() {
+            replacement = editor.make().tail_only_block_expr(replacement.into());
+            prefer_container = Some(container.clone());
+            break IndentLevel::from_node(&container);
+        }
     };
     let is_branch =
         !block.is_standalone() || place.syntax().parent().and_then(ast::MatchArm::cast).is_some();
@@ -115,7 +120,7 @@ pub(crate) fn unwrap_branch(acc: &mut Assists, ctx: &AssistContext<'_>) -> Optio
 //     }
 // }
 // ```
-pub(crate) fn unwrap_block(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
+pub(crate) fn unwrap_block(acc: &mut Assists, ctx: &AssistContext<'_, '_>) -> Option<()> {
     let l_curly_token = ctx.find_token_syntax_at_offset(T!['{'])?;
     let block = l_curly_token.parent_ancestors().nth(1).and_then(ast::BlockExpr::cast)?;
     let target = block.syntax().text_range();
@@ -182,7 +187,7 @@ fn wrap_let(assign: &ast::LetStmt, replacement: ast::BlockExpr) -> ast::BlockExp
     try_wrap_assign().unwrap_or(replacement)
 }
 
-fn unwrap_branch_place(ctx: &AssistContext<'_>) -> Option<ast::Expr> {
+fn unwrap_branch_place(ctx: &AssistContext<'_, '_>) -> Option<ast::Expr> {
     if let Some(l_curly_token) = ctx.find_token_syntax_at_offset(T!['{']) {
         let block = l_curly_token.parent_ancestors().nth(1).and_then(ast::BlockExpr::cast)?;
         Some(block.into())
@@ -566,6 +571,88 @@ fn main() {
 
         // comment
         bar();
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn simple_if_in_match_arm() {
+        check_assist(
+            unwrap_branch,
+            r#"
+fn main() {
+    match 1 {
+        1 => if true {$0
+            foo();
+        }
+        _ => (),
+    }
+}
+"#,
+            r#"
+fn main() {
+    match 1 {
+        1 => {
+            foo();
+        }
+        _ => (),
+    }
+}
+"#,
+        );
+
+        check_assist(
+            unwrap_branch,
+            r#"
+fn main() {
+    match 1 {
+        1 => if true {
+            foo();
+        } else {$0
+            bar();
+        }
+        _ => (),
+    }
+}
+"#,
+            r#"
+fn main() {
+    match 1 {
+        1 => {
+            bar();
+        }
+        _ => (),
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn simple_match_in_match_arm() {
+        check_assist(
+            unwrap_branch,
+            r#"
+fn main() {
+    match 1 {
+        1 => match () {
+            _ => {$0
+                foo();
+            }
+        }
+        _ => (),
+    }
+}
+"#,
+            r#"
+fn main() {
+    match 1 {
+        1 => {
+            foo();
+        }
+        _ => (),
     }
 }
 "#,

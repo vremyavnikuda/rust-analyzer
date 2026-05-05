@@ -1,5 +1,5 @@
 use either::Either;
-use hir::HirDisplay;
+use hir::{HirDisplay, SpanAst};
 use stdx::format_to;
 use syntax::{AstNode, SyntaxNodePtr, ast};
 
@@ -9,7 +9,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 //
 // This diagnostic is triggered when rust-analyzer cannot infer some type.
 pub(crate) fn type_must_be_known<'db>(
-    ctx: &DiagnosticsContext<'db>,
+    ctx: &DiagnosticsContext<'db, '_>,
     d: &hir::TypeMustBeKnown<'db>,
 ) -> Diagnostic {
     let mut at_point = d.at_point.map(|it| it.syntax_node_ptr());
@@ -17,7 +17,7 @@ pub(crate) fn type_must_be_known<'db>(
 
     // Do some adjustments to the node: FIXME: We should probably do that at the emitting site.
     let node = ctx.sema.to_node(d.at_point);
-    if let Either::Right(Either::Left(expr)) = &node
+    if let SpanAst::Expr(expr) = &node
         && let Some(Either::Left(top_ty)) = &d.top_term
         && let Some(expr_ty) = ctx.sema.type_of_expr(expr)
         && expr_ty.original == *top_ty
@@ -99,6 +99,62 @@ fn foo() {
     let _x = any();
           // ^^^^^ error: type annotations needed
               // | full type: `X<{unknown}>`
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn const_block_does_not_cause_error() {
+        check_diagnostics(
+            r#"
+fn bar<T>(_inner: fn() -> *const T) {}
+
+fn foo() {
+    bar(const { || 0 as *const i32 })
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn async_closure_does_not_trigger() {
+        check_diagnostics(
+            r#"
+//- minicore: async_fn
+struct Task<R>(R);
+fn spawn_in<AsyncFn, R>(_f: AsyncFn) -> Task<R>
+where
+    R: 'static,
+    AsyncFn: AsyncFnOnce(&()) -> R + 'static,
+{
+    loop {}
+}
+
+fn foo() {
+    spawn_in(async move |cx| {});
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn regression_22263() {
+        check_diagnostics(
+            r#"
+trait From<T> {}
+impl<T> From<T> for T {}
+#[rustc_reservation_impl = "blah blah"]
+impl<T> From<!> for T {}
+
+fn any<T>() -> T {
+    loop {}
+}
+fn foo<T, U: From<T>>(_: T) -> U {
+    loop {}
+}
+fn bar() {
+    let _: () = foo(any());
 }
         "#,
         );

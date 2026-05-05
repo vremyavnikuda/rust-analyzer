@@ -16,7 +16,6 @@ use rustc_abi::Size;
 use rustc_apfloat::Float;
 use rustc_type_ir::inherent::IntoKind;
 use stdx::never;
-use triomphe::Arc;
 
 use crate::{
     LifetimeElisionKind, ParamEnvAndCrate, TyLoweringContext,
@@ -300,7 +299,7 @@ pub(crate) fn eval_to_const<'db>(expr: ExprId, ctx: &mut InferenceContext<'_, 'd
     if let Some(body_owner) = ctx.owner.as_def_with_body()
         && let Ok(mir_body) =
             lower_body_to_mir(ctx.db, body_owner, Body::of(ctx.db, body_owner), &infer, expr)
-        && let Ok((Ok(result), _)) = interpret_mir(ctx.db, Arc::new(mir_body), true, None)
+        && let Ok((Ok(result), _)) = interpret_mir(ctx.db, &mir_body, true, None)
     {
         return Const::new_from_allocation(
             ctx.interner(),
@@ -331,8 +330,8 @@ pub(crate) fn const_eval<'db>(
     };
 
     #[salsa::tracked(returns(ref), cycle_result = const_eval_cycle_result)]
-    pub(crate) fn const_eval_query<'db>(
-        db: &'db dyn HirDatabase,
+    pub(crate) fn const_eval_query(
+        db: &dyn HirDatabase,
         def: ConstId,
         subst: StoredGenericArgs,
         trait_env: Option<StoredParamEnvAndCrate>,
@@ -372,8 +371,8 @@ pub(crate) fn const_eval_static<'db>(
     };
 
     #[salsa::tracked(returns(ref), cycle_result = const_eval_static_cycle_result)]
-    pub(crate) fn const_eval_static_query<'db>(
-        db: &'db dyn HirDatabase,
+    pub(crate) fn const_eval_static_query(
+        db: &dyn HirDatabase,
         def: StaticId,
     ) -> Result<StoredAllocation, ConstEvalError> {
         let interner = DbInterner::new_no_crate(db);

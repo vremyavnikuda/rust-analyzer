@@ -26,6 +26,7 @@ extern crate ra_ap_rustc_next_trait_solver as rustc_next_trait_solver;
 extern crate self as hir_ty;
 
 pub mod builtin_derive;
+mod generics;
 mod infer;
 mod inhabitedness;
 mod lower;
@@ -44,12 +45,12 @@ pub mod diagnostics;
 pub mod display;
 pub mod drop;
 pub mod dyn_compatibility;
-pub mod generics;
 pub mod lang_items;
 pub mod layout;
 pub mod method_resolution;
 pub mod mir;
 pub mod primitive;
+pub mod solver_errors;
 pub mod traits;
 pub mod upvars;
 
@@ -61,9 +62,9 @@ mod tests;
 use std::{hash::Hash, ops::ControlFlow};
 
 use hir_def::{
-    CallableDefId, ExpressionStoreOwnerId, GenericDefId, TypeAliasId, TypeOrConstParamId,
-    TypeParamId,
-    hir::{ExprId, ExprOrPatId, PatId},
+    CallableDefId, ExpressionStoreOwnerId, GenericDefId, LifetimeParamId, TypeAliasId,
+    TypeOrConstParamId, TypeParamId,
+    hir::{BindingId, ExprId, ExprOrPatId, PatId},
     resolver::TypeNs,
     type_ref::{Rawness, TypeRefId},
 };
@@ -210,8 +211,12 @@ impl<'db> MemoryMap<'db> {
 }
 
 /// Return an index of a parameter in the generic type parameter list by it's id.
-pub fn param_idx(db: &dyn HirDatabase, id: TypeOrConstParamId) -> Option<usize> {
+pub fn type_or_const_param_idx(db: &dyn HirDatabase, id: TypeOrConstParamId) -> u32 {
     generics::generics(db, id.parent).type_or_const_param_idx(id)
+}
+
+pub fn lifetime_param_idx(db: &dyn HirDatabase, id: LifetimeParamId) -> u32 {
+    generics::generics(db, id.parent).lifetime_param_idx(id)
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -504,7 +509,7 @@ pub fn associated_type_shorthand_candidates(
     };
 
     let mut dedup_map = FxHashSet::default();
-    let param_ty = Ty::new_param(interner, param, param_idx(db, param.into()).unwrap() as u32);
+    let param_ty = Ty::new_param(interner, param, type_or_const_param_idx(db, param.into()));
     // We use the ParamEnv and not the predicates because the ParamEnv elaborates bounds.
     let param_env = db.trait_environment(ExpressionStoreOwnerId::from(def));
     for clause in param_env.clauses {
@@ -549,7 +554,7 @@ pub fn callable_sig_from_fn_trait<'db>(
         let args = GenericArgs::new_from_slice(&[self_ty.into(), tupled_args.into()]);
         let trait_id = trait_.get_id(lang_items)?;
         let trait_ref = TraitRef::new_from_args(interner, trait_id.into(), args);
-        let obligation = Obligation::new(interner, cause.clone(), param_env, trait_ref);
+        let obligation = Obligation::new(interner, cause, param_env, trait_ref);
         ocx.register_obligation(obligation);
         if !ocx.try_evaluate_obligations().is_empty() {
             return None;
@@ -568,10 +573,7 @@ pub fn callable_sig_from_fn_trait<'db>(
         return None;
     };
 
-    let fn_once_trait = lang_items.FnOnce?;
-    let output_assoc_type = fn_once_trait
-        .trait_items(db)
-        .associated_type_by_name(&Name::new_symbol_root(sym::Output))?;
+    let output_assoc_type = lang_items.FnOnceOutput?;
     let output_projection = Ty::new_alias(
         interner,
         AliasTy::new(
@@ -674,11 +676,12 @@ pub fn known_const_to_ast<'db>(
 pub enum Span {
     ExprId(ExprId),
     PatId(PatId),
+    BindingId(BindingId),
     TypeRefId(TypeRefId),
     /// An unimportant location. Errors on this will be suppressed.
     Dummy,
 }
-impl_from!(ExprId, PatId, TypeRefId for Span);
+impl_from!(ExprId, PatId, BindingId, TypeRefId for Span);
 
 impl From<ExprOrPatId> for Span {
     fn from(value: ExprOrPatId) -> Self {

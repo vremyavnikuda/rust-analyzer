@@ -2,8 +2,7 @@
 
 use std::collections::hash_map;
 
-use hir_def::{GenericParamId, TraitId, hir::ExprId};
-use intern::{Symbol, sym};
+use hir_def::{FunctionId, GenericParamId, TraitId, hir::ExprId};
 use rustc_ast_ir::Mutability;
 use rustc_type_ir::inherent::{IntoKind, Ty as _};
 use syntax::ast::{ArithOp, BinaryOp, UnaryOp};
@@ -194,6 +193,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         // particularly for things like `String + &String`.
         let rhs_ty_var = self.table.next_ty_var(rhs_expr.into());
         let result = self.lookup_op_method(
+            expr,
             lhs_ty,
             Some((rhs_expr, rhs_ty_var)),
             self.lang_item_for_bin_op(op),
@@ -265,7 +265,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         operand_ty: Ty<'db>,
         op: UnaryOp,
     ) -> Ty<'db> {
-        match self.lookup_op_method(operand_ty, None, self.lang_item_for_unop(op)) {
+        match self.lookup_op_method(ex, operand_ty, None, self.lang_item_for_unop(op)) {
             Ok(method) => {
                 self.write_method_resolution(ex, method.def_id, method.args);
                 method.sig.output()
@@ -279,31 +279,32 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
 
     fn lookup_op_method(
         &mut self,
+        expr: ExprId,
         lhs_ty: Ty<'db>,
         opt_rhs: Option<(ExprId, Ty<'db>)>,
-        (opname, trait_did): (Symbol, Option<TraitId>),
+        (op_method, trait_did): (Option<FunctionId>, Option<TraitId>),
     ) -> Result<MethodCallee<'db>, Vec<NextSolverError<'db>>> {
-        let Some(trait_did) = trait_did else {
+        let (Some(trait_did), Some(op_method)) = (trait_did, op_method) else {
             // Bail if the operator trait is not defined.
             return Err(vec![]);
         };
 
         debug!(
             "lookup_op_method(lhs_ty={:?}, opname={:?}, trait_did={:?})",
-            lhs_ty, opname, trait_did
+            lhs_ty, op_method, trait_did
         );
 
         let opt_rhs_ty = opt_rhs.map(|it| it.1);
-        let cause = ObligationCause::new();
+        let cause = ObligationCause::new(expr);
 
         // We don't consider any other candidates if this lookup fails
         // so we can freely treat opaque types as inference variables here
         // to allow more code to compile.
         let treat_opaques = TreatNotYetDefinedOpaques::AsInfer;
         let method = self.table.lookup_method_for_operator(
-            cause.clone(),
-            opname,
+            cause,
             trait_did,
+            op_method,
             lhs_ty,
             opt_rhs_ty,
             treat_opaques,
@@ -358,20 +359,20 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         }
     }
 
-    fn lang_item_for_bin_op(&self, op: BinaryOp) -> (Symbol, Option<TraitId>) {
-        let (method_name, trait_lang_item) =
+    fn lang_item_for_bin_op(&self, op: BinaryOp) -> (Option<FunctionId>, Option<TraitId>) {
+        let (method, trait_lang_item) =
             crate::lang_items::lang_items_for_bin_op(self.lang_items, op)
                 .expect("invalid operator provided");
-        (method_name, trait_lang_item)
+        (method, trait_lang_item)
     }
 
-    fn lang_item_for_unop(&self, op: UnaryOp) -> (Symbol, Option<TraitId>) {
-        let (method_name, trait_lang_item) = match op {
-            UnaryOp::Not => (sym::not, self.lang_items.Not),
-            UnaryOp::Neg => (sym::neg, self.lang_items.Neg),
+    fn lang_item_for_unop(&self, op: UnaryOp) -> (Option<FunctionId>, Option<TraitId>) {
+        let (method, trait_lang_item) = match op {
+            UnaryOp::Not => (self.lang_items.Not_not, self.lang_items.Not),
+            UnaryOp::Neg => (self.lang_items.Neg_neg, self.lang_items.Neg),
             UnaryOp::Deref => panic!("Deref is not overloadable"),
         };
-        (method_name, trait_lang_item)
+        (method, trait_lang_item)
     }
 }
 

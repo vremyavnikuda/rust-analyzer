@@ -10,7 +10,6 @@ use syntax::{
     ast::{self, HasAttrs},
 };
 use syntax_bridge::DocCommentDesugarMode;
-use triomphe::Arc;
 
 use crate::{
     AstId, ExpandError, ExpandErrorKind, ExpandResult, HirFileId, Lookup, MacroCallId,
@@ -78,12 +77,16 @@ impl DeclarativeMacroExpander {
                 .map_err(Into::into),
         }
     }
+}
 
+#[salsa::tracked]
+impl DeclarativeMacroExpander {
+    #[salsa::tracked(returns(ref))]
     pub(crate) fn expander(
         db: &dyn ExpandDatabase,
         def_crate: Crate,
         id: AstId<ast::Macro>,
-    ) -> Arc<DeclarativeMacroExpander> {
+    ) -> DeclarativeMacroExpander {
         let (root, map) = crate::db::parse_with_map(db, id.file_id);
         let root = root.syntax_node();
 
@@ -128,7 +131,7 @@ impl DeclarativeMacroExpander {
                     Some(arg) => {
                         let tt = syntax_bridge::syntax_node_to_token_tree(
                             arg.syntax(),
-                            map.as_ref(),
+                            map,
                             map.span_for_range(
                                 macro_rules.macro_rules_token().unwrap().text_range(),
                             ),
@@ -152,14 +155,14 @@ impl DeclarativeMacroExpander {
                         let args = macro_def.args().map(|args| {
                             syntax_bridge::syntax_node_to_token_tree(
                                 args.syntax(),
-                                map.as_ref(),
+                                map,
                                 span,
                                 DocCommentDesugarMode::Mbe,
                             )
                         });
                         let body = syntax_bridge::syntax_node_to_token_tree(
                             body.syntax(),
-                            map.as_ref(),
+                            map,
                             span,
                             DocCommentDesugarMode::Mbe,
                         );
@@ -177,6 +180,6 @@ impl DeclarativeMacroExpander {
             HirFileId::MacroFile(macro_file) => macro_file.lookup(db).ctxt,
             HirFileId::FileId(file) => SyntaxContext::root(file.edition(db)),
         });
-        Arc::new(DeclarativeMacroExpander { mac, transparency, edition })
+        DeclarativeMacroExpander { mac, transparency, edition }
     }
 }

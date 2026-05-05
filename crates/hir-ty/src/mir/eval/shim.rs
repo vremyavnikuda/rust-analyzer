@@ -4,7 +4,6 @@
 use std::cmp::{self, Ordering};
 
 use hir_def::{attrs::AttrFlags, signatures::FunctionSignature};
-use hir_expand::name::Name;
 use intern::sym;
 use rustc_type_ir::inherent::{GenericArgs as _, IntoKind, SliceLike, Ty as _};
 use stdx::never;
@@ -29,13 +28,13 @@ enum EvalLangItem {
     DropInPlace,
 }
 
-impl<'db> Evaluator<'db> {
+impl<'a, 'db: 'a> Evaluator<'a, 'db> {
     pub(super) fn detect_and_exec_special_function(
         &mut self,
         def: FunctionId,
         args: &[IntervalAndTy<'db>],
         generic_args: GenericArgs<'db>,
-        locals: &Locals,
+        locals: &Locals<'a>,
         destination: Interval,
         span: MirSpan,
     ) -> Result<'db, bool> {
@@ -132,7 +131,7 @@ impl<'db> Evaluator<'db> {
         def: FunctionId,
         args: &[IntervalAndTy<'db>],
         self_ty: Ty<'db>,
-        locals: &Locals,
+        locals: &Locals<'a>,
         destination: Interval,
         span: MirSpan,
     ) -> Result<'db, ()> {
@@ -190,7 +189,7 @@ impl<'db> Evaluator<'db> {
         layout: Arc<Layout>,
         addr: Address,
         def: FunctionId,
-        locals: &Locals,
+        locals: &Locals<'a>,
         destination: Interval,
         span: MirSpan,
     ) -> Result<'db, ()> {
@@ -296,7 +295,7 @@ impl<'db> Evaluator<'db> {
         it: EvalLangItem,
         generic_args: GenericArgs<'db>,
         args: &[IntervalAndTy<'db>],
-        locals: &Locals,
+        locals: &Locals<'a>,
         span: MirSpan,
     ) -> Result<'db, Vec<u8>> {
         use EvalLangItem::*;
@@ -368,7 +367,7 @@ impl<'db> Evaluator<'db> {
         id: i64,
         args: &[IntervalAndTy<'db>],
         destination: Interval,
-        _locals: &Locals,
+        _locals: &Locals<'a>,
         _span: MirSpan,
     ) -> Result<'db, ()> {
         match id {
@@ -399,7 +398,7 @@ impl<'db> Evaluator<'db> {
         args: &[IntervalAndTy<'db>],
         _generic_args: GenericArgs<'db>,
         destination: Interval,
-        locals: &Locals,
+        locals: &Locals<'a>,
         span: MirSpan,
     ) -> Result<'db, ()> {
         match as_str {
@@ -563,7 +562,7 @@ impl<'db> Evaluator<'db> {
         args: &[IntervalAndTy<'db>],
         generic_args: GenericArgs<'db>,
         destination: Interval,
-        locals: &Locals,
+        locals: &Locals<'a>,
         span: MirSpan,
         needs_override: bool,
     ) -> Result<'db, bool> {
@@ -1202,11 +1201,7 @@ impl<'db> Evaluator<'db> {
                     let addr = tuple.interval.addr.offset(offset);
                     args.push(IntervalAndTy::new(addr, field, self, locals)?);
                 }
-                if let Some(target) = self.lang_items().FnOnce
-                    && let Some(def) = target
-                        .trait_items(self.db)
-                        .method_by_name(&Name::new_symbol_root(sym::call_once))
-                {
+                if let Some(def) = self.lang_items().FnOnce_call_once {
                     self.exec_fn_trait(
                         def,
                         &args,
@@ -1345,7 +1340,7 @@ impl<'db> Evaluator<'db> {
         &mut self,
         ty: Ty<'db>,
         metadata: Interval,
-        locals: &Locals,
+        locals: &Locals<'a>,
     ) -> Result<'db, (usize, usize)> {
         Ok(match ty.kind() {
             TyKind::Str => (from_bytes!(usize, metadata.get(self)?), 1),
@@ -1404,7 +1399,7 @@ impl<'db> Evaluator<'db> {
         args: &[IntervalAndTy<'db>],
         generic_args: GenericArgs<'db>,
         destination: Interval,
-        locals: &Locals,
+        locals: &Locals<'a>,
         _span: MirSpan,
     ) -> Result<'db, ()> {
         // We are a single threaded runtime with no UB checking and no optimization, so

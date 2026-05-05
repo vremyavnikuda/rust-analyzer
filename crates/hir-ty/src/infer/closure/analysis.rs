@@ -44,7 +44,7 @@ use macros::{TypeFoldable, TypeVisitable};
 use rustc_ast_ir::Mutability;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use rustc_type_ir::{
-    BoundVar, ClosureKind, TypeVisitableExt as _,
+    BoundVar, ClosureKind,
     inherent::{AdtDef as _, GenericArgs as _, IntoKind as _, Ty as _},
 };
 use smallvec::{SmallVec, smallvec};
@@ -52,7 +52,7 @@ use span::Edition;
 use tracing::{debug, instrument};
 
 use crate::{
-    FnAbi,
+    FnAbi, Span,
     infer::{
         CaptureInfo, CaptureSourceStack, CapturedPlace, InferenceContext, UpvarCapture,
         closure::analysis::expr_use_visitor::{
@@ -403,9 +403,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         // For coroutine-closures, we additionally must compute the
         // `coroutine_captures_by_ref_ty` type, which is used to generate the by-ref
         // version of the coroutine-closure's output coroutine.
-        if let UpvarArgs::CoroutineClosure(args) = args
-            && !args.references_error()
-        {
+        if let UpvarArgs::CoroutineClosure(args) = args {
             let closure_env_region: Region<'_> = Region::new_bound(
                 self.interner(),
                 rustc_type_ir::INNERMOST,
@@ -920,12 +918,12 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         self.result.closures_data.insert(closure_def_id, closure_data);
     }
 
-    fn normalize_capture_place(&self, place: Place) -> Place {
+    fn normalize_capture_place(&self, span: Span, place: Place) -> Place {
         let mut place = self.infcx().resolve_vars_if_possible(place);
 
         // In the new solver, types in HIR `Place`s can contain unnormalized aliases,
         // which can ICE later (e.g. when projecting fields for diagnostics).
-        let cause = ObligationCause::misc();
+        let cause = ObligationCause::new(span);
         let at = self.table.at(&cause);
         match normalize::deeply_normalize_with_skipped_universes_and_ambiguous_coroutine_goals(
             at,
@@ -1011,7 +1009,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
 
         // Normalize eagerly when inserting into `capture_information`, so all downstream
         // capture analysis can assume a normalized `Place`.
-        self.normalize_capture_place(place)
+        self.normalize_capture_place(var_hir_id.into(), place)
     }
 
     /// A captured place is mutable if
@@ -1215,7 +1213,7 @@ impl<'db> euv::Delegate<'db> for InferBorrowKind {
         let mut dummy_capture_info =
             CaptureInfo { sources: SmallVec::new(), capture_kind: dummy_capture_kind };
 
-        let place = ctx.normalize_capture_place(place_with_id.place.clone());
+        let place = ctx.normalize_capture_place(place_with_id.span(), place_with_id.place.clone());
 
         let place = restrict_capture_precision(place, &mut dummy_capture_info);
 
@@ -1231,7 +1229,7 @@ impl<'db> euv::Delegate<'db> for InferBorrowKind {
         };
         assert_eq!(self.closure_def_id, upvar_closure);
 
-        let place = ctx.normalize_capture_place(place_with_id.place.clone());
+        let place = ctx.normalize_capture_place(place_with_id.span(), place_with_id.place.clone());
 
         self.capture_information.push((
             place,
@@ -1246,7 +1244,7 @@ impl<'db> euv::Delegate<'db> for InferBorrowKind {
         };
         assert_eq!(self.closure_def_id, upvar_closure);
 
-        let place = ctx.normalize_capture_place(place_with_id.place.clone());
+        let place = ctx.normalize_capture_place(place_with_id.span(), place_with_id.place.clone());
 
         self.capture_information.push((
             place,
@@ -1271,7 +1269,7 @@ impl<'db> euv::Delegate<'db> for InferBorrowKind {
         let mut capture_info =
             CaptureInfo { sources: place_with_id.origins.iter().cloned().collect(), capture_kind };
 
-        let place = ctx.normalize_capture_place(place_with_id.place.clone());
+        let place = ctx.normalize_capture_place(place_with_id.span(), place_with_id.place.clone());
 
         // We only want repr packed restriction to be applied to reading references into a packed
         // struct, and not when the data is being moved. Therefore we call this method here instead

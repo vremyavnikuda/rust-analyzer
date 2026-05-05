@@ -40,7 +40,7 @@ use crate::{AssistContext, AssistId, Assists};
 // ```
 pub(crate) fn extract_struct_from_enum_variant(
     acc: &mut Assists,
-    ctx: &AssistContext<'_>,
+    ctx: &AssistContext<'_, '_>,
 ) -> Option<()> {
     let variant = ctx.find_node_at_offset::<ast::Variant>()?;
     let field_list = extract_field_list_if_applicable(&variant)?;
@@ -338,7 +338,7 @@ fn update_variant(
     let name = variant.name()?;
     let generic_args = generics
         .filter(|generics| generics.generic_params().count() > 0)
-        .map(|generics| generics.to_generic_args());
+        .map(|generics| generics.to_generic_args(make));
     // FIXME: replace with a `ast::make` constructor
     let ty = match generic_args {
         Some(generic_args) => make.ty(&format!("{name}{generic_args}")),
@@ -416,7 +416,7 @@ fn apply_references(
 }
 
 fn process_references(
-    ctx: &AssistContext<'_>,
+    ctx: &AssistContext<'_, '_>,
     visited_modules: &mut FxHashSet<Module>,
     enum_module_def: &ModuleDef,
     variant_hir_name: &Name,
