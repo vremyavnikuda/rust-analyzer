@@ -5,9 +5,9 @@ use std::{borrow::Cow, cell::RefCell, fmt::Write, iter, mem, ops::Range};
 use base_db::{Crate, target::TargetLoadError};
 use either::Either;
 use hir_def::{
-    AdtId, DefWithBodyId, EnumVariantId, ExpressionStoreOwnerId, FunctionId, GeneralConstId,
-    HasModule, ItemContainerId, Lookup, StaticId, VariantId,
-    expr_store::{Body, HygieneId},
+    AdtId, DefWithBodyId, EnumVariantId, FunctionId, HasModule, ItemContainerId, Lookup, StaticId,
+    VariantId,
+    expr_store::{Body, ExpressionStore, HygieneId},
     item_tree::FieldsShape,
     lang_item::LangItems,
     layout::{TagEncoding, Variants},
@@ -37,9 +37,9 @@ use syntax::{SyntaxNodePtr, TextRange};
 use triomphe::Arc;
 
 use crate::{
-    CallableDefId, ComplexMemoryMap, InferenceResult, MemoryMap, ParamEnvAndCrate,
+    CallableDefId, ComplexMemoryMap, InferBodyId, InferenceResult, MemoryMap, ParamEnvAndCrate,
     consteval::{self, ConstEvalError, try_const_usize},
-    db::{HirDatabase, InternedClosureId},
+    db::{GeneralConstId, HirDatabase, InternedClosureId},
     display::{ClosureStyle, DisplayTarget, HirDisplay},
     infer::PointerCast,
     layout::{Layout, LayoutError, RustcEnumVariantIdx},
@@ -159,7 +159,7 @@ struct StackFrame<'a> {
     locals: Locals<'a>,
     destination: Option<BasicBlockId>,
     prev_stack_ptr: usize,
-    span: (MirSpan, DefWithBodyId),
+    span: (MirSpan, InferBodyId),
 }
 
 #[derive(Clone)]
@@ -193,7 +193,7 @@ pub struct Evaluator<'a, 'db> {
     /// Constantly dropping and creating `Locals` is very costly. We store
     /// old locals that we normally want to drop here, to reuse their allocations
     /// later.
-    unused_locals_store: RefCell<FxHashMap<DefWithBodyId, Vec<Locals<'a>>>>,
+    unused_locals_store: RefCell<FxHashMap<InferBodyId, Vec<Locals<'a>>>>,
     cached_ptr_size: usize,
     cached_fn_trait_func: Option<FunctionId>,
     cached_fn_mut_trait_func: Option<FunctionId>,
@@ -371,7 +371,7 @@ pub enum MirEvalError {
     InvalidConst,
     InFunction(
         Box<MirEvalError>,
-        Vec<(Either<FunctionId, InternedClosureId>, MirSpan, DefWithBodyId)>,
+        Vec<(Either<FunctionId, InternedClosureId>, MirSpan, InferBodyId)>,
     ),
     ExecutionLimitExceeded,
     StackOverflow,
@@ -410,7 +410,16 @@ impl MirEvalError {
                         writeln!(f, "In {closure:?}")?;
                     }
                 }
-                let source_map = &Body::with_source_map(db, *def).1;
+                let (source_map, self_param_syntax) = match *def {
+                    InferBodyId::DefWithBodyId(def) => {
+                        let body = &Body::with_source_map(db, def).1;
+                        (&**body, body.self_param_syntax())
+                    }
+                    InferBodyId::AnonConstId(def) => {
+                        let store = ExpressionStore::with_source_map(db, def.loc(db).owner).1;
+                        (store, None)
+                    }
+                };
                 let span: InFile<SyntaxNodePtr> = match span {
                     MirSpan::ExprId(e) => match source_map.expr_syntax(*e) {
                         Ok(s) => s.map(|it| it.into()),
@@ -430,7 +439,7 @@ impl MirEvalError {
                             None => continue,
                         }
                     }
-                    MirSpan::SelfParam => match source_map.self_param_syntax() {
+                    MirSpan::SelfParam => match self_param_syntax {
                         Some(s) => s.map(|it| it.syntax_node_ptr()),
                         None => continue,
                     },
@@ -458,6 +467,7 @@ impl MirEvalError {
                     ItemContainerId::ImplId(impl_id) => Some({
                         db.impl_self_ty(impl_id)
                             .instantiate_identity()
+                            .skip_norm_wip()
                             .display(db, display_target)
                             .to_string()
                     }),
@@ -650,7 +660,7 @@ const EXECUTION_LIMIT: usize = 10_000_000;
 impl<'a, 'db: 'a> Evaluator<'a, 'db> {
     pub fn new(
         db: &'db dyn HirDatabase,
-        owner: DefWithBodyId,
+        owner: InferBodyId,
         assert_placeholder_ty_is_unused: bool,
         trait_env: Option<ParamEnvAndCrate<'db>>,
     ) -> Result<'db, Evaluator<'a, 'db>> {
@@ -675,7 +685,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
             db,
             random_state: oorandom::Rand64::new(0),
             param_env: trait_env.unwrap_or_else(|| ParamEnvAndCrate {
-                param_env: db.trait_environment(ExpressionStoreOwnerId::from(owner)),
+                param_env: db.trait_environment(owner.expression_store_owner(db)),
                 krate: crate_id,
             }),
             crate_id,
@@ -834,7 +844,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                         Variants::Multiple { variants, .. } => {
                             &variants[match f.parent {
                                 hir_def::VariantId::EnumVariantId(it) => {
-                                    RustcEnumVariantIdx(it.lookup(self.db).index as usize)
+                                    RustcEnumVariantIdx(it.index(self.db))
                                 }
                                 _ => {
                                     return Err(MirEvalError::InternalError(
@@ -1044,7 +1054,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                     let my_code_stack = mem::replace(&mut self.code_stack, prev_code_stack);
                     let mut error_stack = vec![];
                     for frame in my_code_stack.into_iter().rev() {
-                        if let DefWithBodyId::FunctionId(f) = frame.locals.body.owner {
+                        if let Some(f) = frame.locals.body.owner.as_function() {
                             error_stack.push((Either::Left(f), frame.span.0, frame.span.1));
                         }
                     }
@@ -1706,7 +1716,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
             if let Some(ty) =
                 field_types.iter().last().map(|it| it.1.get().instantiate(self.interner(), subst))
             {
-                return self.coerce_unsized_look_through_fields(ty, goal);
+                return self.coerce_unsized_look_through_fields(ty.skip_norm_wip(), goal);
             }
         }
         Err(MirEvalError::CoerceUnsizedError(ty.store()))
@@ -1783,10 +1793,12 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                     };
                     let target_last_field = self.db.field_types(id.into())[last_field]
                         .get()
-                        .instantiate(self.interner(), target_subst);
+                        .instantiate(self.interner(), target_subst)
+                        .skip_norm_wip();
                     let current_last_field = self.db.field_types(id.into())[last_field]
                         .get()
-                        .instantiate(self.interner(), current_subst);
+                        .instantiate(self.interner(), current_subst)
+                        .skip_norm_wip();
                     return self.unsizing_ptr_from_addr(
                         target_last_field,
                         current_last_field,
@@ -1806,7 +1818,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
         locals: &Locals<'a>,
     ) -> Result<'db, (usize, Arc<Layout>, Option<(usize, usize, i128)>)> {
         let adt = it.adt_id(self.db);
-        if let DefWithBodyId::VariantId(f) = locals.body.owner
+        if let Some(f) = locals.body.owner.as_variant()
             && let VariantId::EnumVariantId(it) = it
             && let AdtId::EnumId(e) = adt
             && f.lookup(self.db).parent == e
@@ -1825,8 +1837,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                     _ => not_supported!("multi variant layout for non-enums"),
                 };
                 let mut discriminant = self.const_eval_discriminant(enum_variant_id)?;
-                let lookup = enum_variant_id.lookup(self.db);
-                let rustc_enum_variant_idx = RustcEnumVariantIdx(lookup.index as usize);
+                let rustc_enum_variant_idx = RustcEnumVariantIdx(enum_variant_id.index(self.db));
                 let variant_layout = variants[rustc_enum_variant_idx].clone();
                 let have_tag = match tag_encoding {
                     TagEncoding::Direct => true,
@@ -2058,9 +2069,9 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
             ConstKind::Unevaluated(UnevaluatedConst { def: const_id, args: subst }) => {
                 let mut id = const_id.0;
                 let mut subst = subst;
-                if let hir_def::GeneralConstId::ConstId(c) = id {
+                if let GeneralConstId::ConstId(c) = id {
                     let (c, s) = lookup_impl_const(&self.infcx, self.param_env.param_env, c, subst);
-                    id = hir_def::GeneralConstId::ConstId(c);
+                    id = GeneralConstId::ConstId(c);
                     subst = s;
                 }
                 let allocation = match id {
@@ -2076,9 +2087,13 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                             MirEvalError::ConstEvalError(name, Box::new(e))
                         })?
                     }
-                    GeneralConstId::AnonConstId(_) => {
-                        not_supported!("anonymous const evaluation")
-                    }
+                    GeneralConstId::AnonConstId(anon_const_id) => self
+                        .db
+                        .anon_const_eval(anon_const_id, subst, Some(self.param_env))
+                        .map_err(|e| {
+                            let name = id.name(self.db);
+                            MirEvalError::ConstEvalError(name, Box::new(e))
+                        })?,
                 };
                 self.allocate_allocation_in_heap(locals, allocation)
             }
@@ -2237,7 +2252,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                 .is_sized()
                 .then(|| (layout.size.bytes_usize(), layout.align.bytes() as usize)));
         }
-        if let DefWithBodyId::VariantId(f) = locals.body.owner
+        if let Some(f) = locals.body.owner.as_variant()
             && let Some((AdtId::EnumId(e), _)) = ty.as_adt()
             && f.lookup(self.db).parent == e
         {
@@ -2422,7 +2437,10 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                                 .fields
                                 .offset(u32::from(f.into_raw()) as usize)
                                 .bytes_usize();
-                            let ty = field_types[f].get().instantiate(this.interner(), subst);
+                            let ty = field_types[f]
+                                .get()
+                                .instantiate(this.interner(), subst)
+                                .skip_norm_wip();
                             let size = this.layout(ty)?.size.bytes_usize();
                             rec(
                                 this,
@@ -2448,7 +2466,10 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                             for (f, _) in data.fields().iter() {
                                 let offset =
                                     l.fields.offset(u32::from(f.into_raw()) as usize).bytes_usize();
-                                let ty = field_types[f].get().instantiate(this.interner(), subst);
+                                let ty = field_types[f]
+                                    .get()
+                                    .instantiate(this.interner(), subst)
+                                    .skip_norm_wip();
                                 let size = this.layout(ty)?.size.bytes_usize();
                                 rec(
                                     this,
@@ -2534,7 +2555,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                 AdtId::StructId(s) => {
                     for (i, (_, ty)) in self.db.field_types(s.into()).iter().enumerate() {
                         let offset = layout.fields.offset(i).bytes_usize();
-                        let ty = ty.get().instantiate(self.interner(), args);
+                        let ty = ty.get().instantiate(self.interner(), args).skip_norm_wip();
                         self.patch_addresses(
                             patch_map,
                             ty_of_bytes,
@@ -2555,7 +2576,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                     ) {
                         for (i, (_, ty)) in self.db.field_types(ev.into()).iter().enumerate() {
                             let offset = layout.fields.offset(i).bytes_usize();
-                            let ty = ty.get().instantiate(self.interner(), args);
+                            let ty = ty.get().instantiate(self.interner(), args).skip_norm_wip();
                             self.patch_addresses(
                                 patch_map,
                                 ty_of_bytes,
@@ -3071,7 +3092,8 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
                                     let addr = addr.offset(offset);
                                     let ty = field_types[field]
                                         .get()
-                                        .instantiate(self.interner(), subst);
+                                        .instantiate(self.interner(), subst)
+                                        .skip_norm_wip();
                                     self.run_drop_glue_deep(ty, locals, addr, &[], span)?;
                                 }
                             }
@@ -3127,7 +3149,7 @@ impl<'a, 'db: 'a> Evaluator<'a, 'db> {
 
 pub fn render_const_using_debug_impl<'db>(
     db: &'db dyn HirDatabase,
-    owner: DefWithBodyId,
+    owner: InferBodyId,
     c: Allocation<'db>,
     ty: Ty<'db>,
 ) -> Result<'db, String> {

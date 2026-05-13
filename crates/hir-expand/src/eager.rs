@@ -20,7 +20,9 @@
 //! See the full discussion : <https://rust-lang.zulipchat.com/#narrow/stream/131828-t-compiler/topic/Eager.20expansion.20of.20built-in.20macros>
 use base_db::Crate;
 use span::SyntaxContext;
-use syntax::{AstPtr, Parse, SyntaxElement, SyntaxNode, TextSize, WalkEvent, ted};
+use syntax::{
+    AstPtr, Parse, SyntaxElement, SyntaxNode, TextSize, WalkEvent, syntax_editor::SyntaxEditor,
+};
 use syntax_bridge::DocCommentDesugarMode;
 
 use crate::{
@@ -58,7 +60,7 @@ pub fn expand_eager_macro_input(
         kind: MacroCallKind::FnLike { ast_id, expand_to: ExpandTo::Expr, eager: None },
         ctxt: call_site,
     };
-    let arg_id = db.intern_macro_call(loc);
+    let arg_id = MacroCallId::new(db, loc);
     #[allow(deprecated)] // builtin eager macros are never derives
     let (_, _, span) = db.macro_arg(arg_id);
     let ExpandResult { value: (arg_exp, arg_exp_map), err: parse_err } =
@@ -113,7 +115,7 @@ pub fn expand_eager_macro_input(
         ctxt: call_site,
     };
 
-    ExpandResult { value: Some(db.intern_macro_call(loc)), err }
+    ExpandResult { value: Some(MacroCallId::new(db, loc)), err }
 }
 
 fn lazy_expand<'db>(
@@ -150,7 +152,8 @@ fn eager_macro_recur(
     macro_resolver: &dyn Fn(&ModPath) -> Option<MacroDefId>,
     eager_callback: EagerCallBackFn<'_>,
 ) -> ExpandResult<Option<(SyntaxNode, TextSize)>> {
-    let original = curr.value.clone_for_update();
+    let (editor, _) = SyntaxEditor::new(curr.value.clone());
+    let original = curr.value.clone();
 
     let mut replacements = Vec::new();
 
@@ -289,6 +292,7 @@ fn eager_macro_recur(
         }
     }
 
-    replacements.into_iter().rev().for_each(|(old, new)| ted::replace(old.syntax(), new));
+    replacements.into_iter().rev().for_each(|(old, new)| editor.replace(old.syntax(), new));
+    let original = editor.finish().new_root().clone();
     ExpandResult { value: Some((original, offset)), err: error }
 }

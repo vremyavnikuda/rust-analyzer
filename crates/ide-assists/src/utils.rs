@@ -21,8 +21,7 @@ use syntax::{
     SyntaxNode, SyntaxToken, T, TextRange, TextSize, WalkEvent,
     ast::{
         self, HasArgList, HasAttrs, HasGenericParams, HasName, HasTypeBounds, Whitespace,
-        edit::{AstNodeEdit, IndentLevel},
-        edit_in_place::AttrsOwnerEdit,
+        edit::{AstNodeEdit, AttrsOwnerEdit, IndentLevel},
         make,
         prec::ExprPrecedence,
         syntax_factory::SyntaxFactory,
@@ -183,7 +182,11 @@ pub fn filter_assoc_items(
                 (default_methods, def.body()),
                 (DefaultMethods::Only, Some(_)) | (DefaultMethods::No, None)
             ),
-            _ => default_methods == DefaultMethods::No,
+            ast::AssocItem::TypeAlias(def) => matches!(
+                (default_methods, def.ty()),
+                (DefaultMethods::Only, Some(_)) | (DefaultMethods::No, None)
+            ),
+            ast::AssocItem::MacroCall(_) => unreachable!(),
         })
         .collect();
 
@@ -242,8 +245,9 @@ pub fn add_trait_assoc_items_to_impl(
                     PathTransform::trait_impl(target_scope, &source_scope, trait_, impl_.clone());
                 cloned_item = ast::AssocItem::cast(transform.apply(cloned_item.syntax())).unwrap();
             }
-            cloned_item.remove_attrs_and_docs();
-            cloned_item
+            let (editor, cloned_item) = SyntaxEditor::with_ast_node(&cloned_item);
+            cloned_item.remove_attrs_and_docs(&editor);
+            ast::AssocItem::cast(editor.finish().new_root().clone()).unwrap()
         })
         .filter_map(|item| match item {
             ast::AssocItem::Fn(fn_) if fn_.body().is_none() => {
@@ -412,6 +416,7 @@ fn check_pat_variant_nested_or_literal_with_depth(
         | ast::Pat::MacroPat(_)
         | ast::Pat::PathPat(_)
         | ast::Pat::BoxPat(_)
+        | ast::Pat::DerefPat(_)
         | ast::Pat::ConstBlockPat(_) => true,
 
         ast::Pat::IdentPat(ident_pat) => ident_pat.pat().is_some_and(|pat| {
@@ -836,8 +841,8 @@ pub(crate) fn convert_reference_type<'db>(
 }
 
 fn could_deref_to_target(ty: &hir::Type<'_>, target: &hir::Type<'_>, db: &dyn HirDatabase) -> bool {
-    let ty_ref = ty.add_reference(hir::Mutability::Shared);
-    let target_ref = target.add_reference(hir::Mutability::Shared);
+    let ty_ref = ty.add_reference(db, hir::Mutability::Shared);
+    let target_ref = target.add_reference(db, hir::Mutability::Shared);
     ty_ref.could_coerce_to(db, &target_ref)
 }
 
@@ -865,7 +870,7 @@ fn handle_as_ref_slice(
     famous_defs: &FamousDefs<'_, '_>,
 ) -> Option<(ReferenceConversionType, bool)> {
     let type_argument = ty.type_arguments().next()?;
-    let slice_type = hir::Type::new_slice(type_argument);
+    let slice_type = hir::Type::new_slice(db, type_argument);
 
     ty.impls_trait(db, famous_defs.core_convert_AsRef()?, slice::from_ref(&slice_type)).then_some((
         ReferenceConversionType::AsRefSlice,

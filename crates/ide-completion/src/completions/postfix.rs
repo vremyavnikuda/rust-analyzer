@@ -12,7 +12,7 @@ use ide_db::{
     text_edit::TextEdit,
     ty_filter::TryEnum,
 };
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use stdx::never;
 use syntax::{
     SmolStr,
@@ -398,7 +398,7 @@ fn get_receiver_text(
     }
     let file_text = sema.db.file_text(range.file_id.file_id(sema.db));
     let text = file_text.text(sema.db);
-    let indent_spaces = indent_of_tail_line(&text[TextRange::up_to(range.range.start())]);
+    let indent_spaces = indent_of_tail_line(&text[TextRange::up_to(range.range.end())]);
     let mut text = stdx::dedent_by(indent_spaces, &text[range.range]);
 
     // The receiver texts should be interpreted as-is, as they are expected to be
@@ -468,6 +468,11 @@ fn include_references(initial_element: &ast::Expr) -> (ast::Expr, String) {
                 .syntax()
                 .children_with_tokens()
                 .filter(|it| Some(it) != last_child_or_token.as_ref())
+                .flat_map(|it| {
+                    let has_ws = it.next_sibling_or_token().is_some_and(|it| it.kind().is_trivia());
+                    let need_ws = !has_ws && it.kind().is_any_identifier();
+                    itertools::chain([Either::Left(it)], need_ws.then_some(Either::Right(" ")))
+                })
                 .format("")
                 .to_smolstr()
                 .as_str(),
@@ -1569,6 +1574,15 @@ fn main() {
             r#"fn main() { &raw const Foo::bar::SOME_CONST.$0 }"#,
             r#"fn main() { (&raw const Foo::bar::SOME_CONST) }"#,
         );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"macro_rules! id { ($($t:tt)*) => ($($t)*); }
+fn main() { id!(&raw const Foo::bar::SOME_CONST.$0) }"#,
+            r#"macro_rules! id { ($($t:tt)*) => ($($t)*); }
+fn main() { id!((&raw const Foo::bar::SOME_CONST)) }"#,
+        );
     }
 
     #[test]
@@ -1658,7 +1672,9 @@ fn foo(x: Option<i32>, y: Option<i32>) {
     let _f = || {
         x
             .and(y)
-            .map(|it| it+2)
+            .map(|it| {
+                it+2
+            })
             .$0
     };
 }
@@ -1667,8 +1683,10 @@ fn foo(x: Option<i32>, y: Option<i32>) {
 fn foo(x: Option<i32>, y: Option<i32>) {
     let _f = || {
         let $0 = x
-    .and(y)
-    .map(|it| it+2);
+.and(y)
+.map(|it| {
+    it+2
+});
     };
 }
 "#,

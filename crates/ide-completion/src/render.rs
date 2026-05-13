@@ -471,6 +471,11 @@ fn render_resolution_path(
                 .insert_snippet(cap, ""); // set is snippet
         }
     }
+    let allow_module_path = matches!(path_ctx.kind, PathKind::Use) || !config.add_colons_to_module;
+    if !allow_module_path && matches!(resolution, ScopeDef::ModuleDef(Module(_))) {
+        insert_text = format_smolstr!("{insert_text}::");
+        item.lookup_by(name.clone()).label(insert_text.clone());
+    }
     adds_ret_type_arrow(completion, path_ctx, &mut item, insert_text.into());
 
     let mut set_item_relevance = |ty: Type<'_>| {
@@ -713,7 +718,9 @@ fn compute_ref_match(
     if let Some(expected_without_ref) = &expected_without_ref
         && (completion_without_ref.is_none()
             || completion_ty.could_unify_with(ctx.db, expected_without_ref))
-        && completion_ty.autoderef(ctx.db).any(|ty| ty == *expected_without_ref)
+        && completion_ty
+            .autoderef(ctx.db)
+            .any(|ty| ty.could_unify_with(ctx.db, expected_without_ref))
     {
         cov_mark::hit!(suggest_ref);
         let mutability = if expected_type.is_mutable_reference() {
@@ -940,7 +947,7 @@ fn main() {
                 st dep::test_mod_b::Struct {…} dep::test_mod_b::Struct {  } [type_could_unify]
                 ex dep::test_mod_b::Struct {  }  [type_could_unify]
                 st Struct Struct [type_could_unify+requires_import]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(Struct) []
                 st Struct Struct [requires_import]
@@ -978,7 +985,7 @@ fn main() {
 "#,
             expect![[r#"
                 un Union Union [type_could_unify+requires_import]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(Union) []
                 en Union Union [requires_import]
@@ -1016,7 +1023,7 @@ fn main() {
                 ev dep::test_mod_b::Enum::variant dep::test_mod_b::Enum::variant [type_could_unify]
                 ex dep::test_mod_b::Enum::variant  [type_could_unify]
                 en Enum Enum [type_could_unify+requires_import]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(Enum) []
                 en Enum Enum [requires_import]
@@ -1053,7 +1060,7 @@ fn main() {
             expect![[r#"
                 ev dep::test_mod_b::Enum::Variant dep::test_mod_b::Enum::Variant [type_could_unify]
                 ex dep::test_mod_b::Enum::Variant  [type_could_unify]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(Enum) []
             "#]],
@@ -1083,7 +1090,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(fn(usize) -> i32) []
                 fn function fn(usize) -> i32 [requires_import]
@@ -1116,7 +1123,7 @@ fn main() {
 "#,
             expect![[r#"
                 ct CONST i32 [type_could_unify+requires_import]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(i32) []
                 ct CONST i64 [requires_import]
@@ -1148,7 +1155,7 @@ fn main() {
 "#,
             expect![[r#"
                 sc STATIC i32 [type_could_unify+requires_import]
-                md dep  []
+                md dep::  []
                 fn main() fn() []
                 fn test(…) fn(i32) []
                 sc STATIC i64 [requires_import]
@@ -1526,15 +1533,16 @@ fn main() { let _: m::Spam = S$0 }
                         detail: "fn()",
                     },
                     CompletionItem {
-                        label: "m",
+                        label: "m::",
                         detail_left: None,
                         detail_right: None,
                         source_range: 75..76,
                         delete: 75..76,
-                        insert: "m",
+                        insert: "m::",
                         kind: SymbolKind(
                             Module,
                         ),
+                        lookup: "m",
                     },
                     CompletionItem {
                         label: "m::Spam::Bar(…)",
@@ -1630,15 +1638,16 @@ fn main() { som$0 }
             expect![[r#"
                 [
                     CompletionItem {
-                        label: "something_deprecated",
+                        label: "something_deprecated::",
                         detail_left: None,
                         detail_right: None,
                         source_range: 55..58,
                         delete: 55..58,
-                        insert: "something_deprecated",
+                        insert: "something_deprecated::",
                         kind: SymbolKind(
                             Module,
                         ),
+                        lookup: "something_deprecated",
                         deprecated: true,
                         relevance: CompletionRelevance {
                             exact_name_match: false,
@@ -2809,8 +2818,8 @@ mod b {
             expect![[r#"
                 st Fooa Fooa []
                 tt Foob  []
-                md a  []
-                md b  []
+                md a::  []
+                md b::  []
             "#]],
         );
     }
@@ -2917,6 +2926,26 @@ fn main() {
                 fn main() fn() []
             "#]],
         );
+        check_relevance(
+            r#"
+struct S<T>(T);
+fn foo<T>(s: &mut S<T>) {}
+fn main() {
+    let mut ssss = S(2u32);
+    foo($0);
+}
+            "#,
+            expect![[r#"
+                st S(…) S(T) []
+                st &mut S(…) [type]
+                lc ssss S<u32> [local]
+                lc &mut ssss [type+local]
+                st S S<{unknown}> []
+                st &mut S [type]
+                fn foo(…) fn(&mut S<T>) []
+                fn main() fn() []
+            "#]],
+        );
     }
 
     #[test]
@@ -2948,7 +2977,7 @@ fn main() {
                 tt Clone  []
                 tt Copy  []
                 fn bar(…) fn(Foo) []
-                md core  []
+                md core::  []
                 fn main() fn() []
             "#]],
         );
@@ -2990,7 +3019,7 @@ fn main() {
                 st &S [type]
                 st T T []
                 st &T [type]
-                md core  []
+                md core::  []
                 fn foo(…) fn(&S) []
                 fn main() fn() []
             "#]],
@@ -3039,7 +3068,7 @@ fn main() {
                 st &mut S [type]
                 st T T []
                 st &mut T [type]
-                md core  []
+                md core::  []
                 fn foo(…) fn(&mut S) []
                 fn main() fn() []
             "#]],
@@ -3142,7 +3171,7 @@ fn main() {
                 st &T [type]
                 fn bar() fn() -> T []
                 fn &bar() [type]
-                md core  []
+                md core::  []
                 fn foo(…) fn(&S) []
                 fn main() fn() []
             "#]],
@@ -3820,7 +3849,7 @@ fn f() {
             expect![[r#"
                 st Buffer Buffer []
                 fn f() fn() []
-                md std  []
+                md std::  []
                 tt BufRead  [requires_import]
                 st BufReader BufReader [requires_import]
                 st BufWriter BufWriter [requires_import]

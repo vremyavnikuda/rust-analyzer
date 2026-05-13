@@ -39,7 +39,7 @@ type PendingObligations<'db> =
 ///
 /// It is also likely that we want to use slightly different datastructures
 /// here as this will have to deal with far more root goals than `evaluate_all`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FulfillmentCtxt<'db> {
     obligations: ObligationStorage<'db>,
 
@@ -243,7 +243,7 @@ impl<'db> FulfillmentCtxt<'db> {
         &mut self,
         infcx: &InferCtxt<'db>,
     ) -> PredicateObligations<'db> {
-        let stalled_coroutines = match infcx.typing_mode() {
+        let stalled_coroutines = match infcx.typing_mode_raw().assert_not_erased() {
             TypingMode::Analysis { defining_opaque_types_and_generators } => {
                 defining_opaque_types_and_generators
             }

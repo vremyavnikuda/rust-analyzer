@@ -62,17 +62,20 @@ mod tests;
 use std::{hash::Hash, ops::ControlFlow};
 
 use hir_def::{
-    CallableDefId, ExpressionStoreOwnerId, GenericDefId, LifetimeParamId, TypeAliasId,
-    TypeOrConstParamId, TypeParamId,
+    CallableDefId, ConstId, DefWithBodyId, EnumVariantId, ExpressionStoreOwnerId, FunctionId,
+    GenericDefId, HasModule, LifetimeParamId, ModuleId, StaticId, TypeAliasId, TypeOrConstParamId,
+    TypeParamId,
+    db::DefDatabase,
+    expr_store::{Body, ExpressionStore},
     hir::{BindingId, ExprId, ExprOrPatId, PatId},
-    resolver::TypeNs,
+    resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{Rawness, TypeRefId},
 };
 use hir_expand::name::Name;
 use indexmap::{IndexMap, map::Entry};
-use intern::{Symbol, sym};
 use macros::GenericTypeVisitable;
 use mir::{MirEvalError, VTableMap};
+use rustc_abi::ExternAbi;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use rustc_type_ir::{
     BoundVarIndexKind, TypeSuperVisitable, TypeVisitableExt,
@@ -83,8 +86,8 @@ use syntax::ast::{ConstArg, make};
 use traits::FnTrait;
 
 use crate::{
-    db::HirDatabase,
-    display::{DisplayTarget, HirDisplay},
+    db::{AnonConstId, HirDatabase},
+    display::HirDisplay,
     lower::SupertraitsInfo,
     next_solver::{
         AliasTy, Binder, BoundConst, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, Canonical,
@@ -106,7 +109,8 @@ pub use infer::{
     could_unify, could_unify_deeply, infer_query_with_inspect,
 };
 pub use lower::{
-    GenericPredicates, ImplTraits, LifetimeElisionKind, TyDefId, TyLoweringContext, ValueTyDefId,
+    GenericDefaults, GenericDefaultsRef, GenericPredicates, ImplTraits, LifetimeElisionKind,
+    TyDefId, TyLoweringContext, TyLoweringInferVarsCtx, TyLoweringResult, ValueTyDefId,
     diagnostics::*,
 };
 pub use next_solver::interner::{attach_db, attach_db_allow_change, with_attached_db};
@@ -217,137 +221,6 @@ pub fn type_or_const_param_idx(db: &dyn HirDatabase, id: TypeOrConstParamId) -> 
 
 pub fn lifetime_param_idx(db: &dyn HirDatabase, id: LifetimeParamId) -> u32 {
     generics::generics(db, id.parent).lifetime_param_idx(id)
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum FnAbi {
-    Aapcs,
-    AapcsUnwind,
-    AvrInterrupt,
-    AvrNonBlockingInterrupt,
-    C,
-    CCmseNonsecureCall,
-    CCmseNonsecureEntry,
-    CDecl,
-    CDeclUnwind,
-    CUnwind,
-    Efiapi,
-    Fastcall,
-    FastcallUnwind,
-    Msp430Interrupt,
-    PtxKernel,
-    RiscvInterruptM,
-    RiscvInterruptS,
-    Rust,
-    RustCall,
-    RustCold,
-    RustIntrinsic,
-    Stdcall,
-    StdcallUnwind,
-    System,
-    SystemUnwind,
-    Sysv64,
-    Sysv64Unwind,
-    Thiscall,
-    ThiscallUnwind,
-    Unadjusted,
-    Vectorcall,
-    VectorcallUnwind,
-    Wasm,
-    Win64,
-    Win64Unwind,
-    X86Interrupt,
-    RustPreserveNone,
-    Unknown,
-}
-
-impl FnAbi {
-    #[rustfmt::skip]
-    pub fn from_symbol(s: &Symbol) -> FnAbi {
-        match s {
-            s if *s == sym::aapcs_dash_unwind => FnAbi::AapcsUnwind,
-            s if *s == sym::aapcs => FnAbi::Aapcs,
-            s if *s == sym::avr_dash_interrupt => FnAbi::AvrInterrupt,
-            s if *s == sym::avr_dash_non_dash_blocking_dash_interrupt => FnAbi::AvrNonBlockingInterrupt,
-            s if *s == sym::C_dash_cmse_dash_nonsecure_dash_call => FnAbi::CCmseNonsecureCall,
-            s if *s == sym::C_dash_cmse_dash_nonsecure_dash_entry => FnAbi::CCmseNonsecureEntry,
-            s if *s == sym::C_dash_unwind => FnAbi::CUnwind,
-            s if *s == sym::C => FnAbi::C,
-            s if *s == sym::cdecl_dash_unwind => FnAbi::CDeclUnwind,
-            s if *s == sym::cdecl => FnAbi::CDecl,
-            s if *s == sym::efiapi => FnAbi::Efiapi,
-            s if *s == sym::fastcall_dash_unwind => FnAbi::FastcallUnwind,
-            s if *s == sym::fastcall => FnAbi::Fastcall,
-            s if *s == sym::msp430_dash_interrupt => FnAbi::Msp430Interrupt,
-            s if *s == sym::ptx_dash_kernel => FnAbi::PtxKernel,
-            s if *s == sym::riscv_dash_interrupt_dash_m => FnAbi::RiscvInterruptM,
-            s if *s == sym::riscv_dash_interrupt_dash_s => FnAbi::RiscvInterruptS,
-            s if *s == sym::rust_dash_call => FnAbi::RustCall,
-            s if *s == sym::rust_dash_cold => FnAbi::RustCold,
-            s if *s == sym::rust_dash_preserve_dash_none => FnAbi::RustPreserveNone,
-            s if *s == sym::rust_dash_intrinsic => FnAbi::RustIntrinsic,
-            s if *s == sym::Rust => FnAbi::Rust,
-            s if *s == sym::stdcall_dash_unwind => FnAbi::StdcallUnwind,
-            s if *s == sym::stdcall => FnAbi::Stdcall,
-            s if *s == sym::system_dash_unwind => FnAbi::SystemUnwind,
-            s if *s == sym::system => FnAbi::System,
-            s if *s == sym::sysv64_dash_unwind => FnAbi::Sysv64Unwind,
-            s if *s == sym::sysv64 => FnAbi::Sysv64,
-            s if *s == sym::thiscall_dash_unwind => FnAbi::ThiscallUnwind,
-            s if *s == sym::thiscall => FnAbi::Thiscall,
-            s if *s == sym::unadjusted => FnAbi::Unadjusted,
-            s if *s == sym::vectorcall_dash_unwind => FnAbi::VectorcallUnwind,
-            s if *s == sym::vectorcall => FnAbi::Vectorcall,
-            s if *s == sym::wasm => FnAbi::Wasm,
-            s if *s == sym::win64_dash_unwind => FnAbi::Win64Unwind,
-            s if *s == sym::win64 => FnAbi::Win64,
-            s if *s == sym::x86_dash_interrupt => FnAbi::X86Interrupt,
-            _ => FnAbi::Unknown,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FnAbi::Aapcs => "aapcs",
-            FnAbi::AapcsUnwind => "aapcs-unwind",
-            FnAbi::AvrInterrupt => "avr-interrupt",
-            FnAbi::AvrNonBlockingInterrupt => "avr-non-blocking-interrupt",
-            FnAbi::C => "C",
-            FnAbi::CCmseNonsecureCall => "C-cmse-nonsecure-call",
-            FnAbi::CCmseNonsecureEntry => "C-cmse-nonsecure-entry",
-            FnAbi::CDecl => "C-decl",
-            FnAbi::CDeclUnwind => "cdecl-unwind",
-            FnAbi::CUnwind => "C-unwind",
-            FnAbi::Efiapi => "efiapi",
-            FnAbi::Fastcall => "fastcall",
-            FnAbi::FastcallUnwind => "fastcall-unwind",
-            FnAbi::Msp430Interrupt => "msp430-interrupt",
-            FnAbi::PtxKernel => "ptx-kernel",
-            FnAbi::RiscvInterruptM => "riscv-interrupt-m",
-            FnAbi::RiscvInterruptS => "riscv-interrupt-s",
-            FnAbi::Rust => "Rust",
-            FnAbi::RustCall => "rust-call",
-            FnAbi::RustCold => "rust-cold",
-            FnAbi::RustPreserveNone => "rust-preserve-none",
-            FnAbi::RustIntrinsic => "rust-intrinsic",
-            FnAbi::Stdcall => "stdcall",
-            FnAbi::StdcallUnwind => "stdcall-unwind",
-            FnAbi::System => "system",
-            FnAbi::SystemUnwind => "system-unwind",
-            FnAbi::Sysv64 => "sysv64",
-            FnAbi::Sysv64Unwind => "sysv64-unwind",
-            FnAbi::Thiscall => "thiscall",
-            FnAbi::ThiscallUnwind => "thiscall-unwind",
-            FnAbi::Unadjusted => "unadjusted",
-            FnAbi::Vectorcall => "vectorcall",
-            FnAbi::VectorcallUnwind => "vectorcall-unwind",
-            FnAbi::Wasm => "wasm",
-            FnAbi::Win64 => "win64",
-            FnAbi::Win64Unwind => "win64-unwind",
-            FnAbi::X86Interrupt => "x86-interrupt",
-            FnAbi::Unknown => "unknown-abi",
-        }
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -591,7 +464,7 @@ pub fn callable_sig_from_fn_trait<'db>(
         ret,
         false,
         Safety::Safe,
-        FnAbi::Rust,
+        ExternAbi::Rust,
     ));
     Some((trait_, sig))
 }
@@ -630,41 +503,14 @@ where
     Vec::from_iter(collector.params)
 }
 
-struct TypeInferenceVarCollector<'db> {
-    type_inference_vars: Vec<Ty<'db>>,
-}
-
-impl<'db> rustc_type_ir::TypeVisitor<DbInterner<'db>> for TypeInferenceVarCollector<'db> {
-    type Result = ();
-
-    fn visit_ty(&mut self, ty: Ty<'db>) -> Self::Result {
-        use crate::rustc_type_ir::Flags;
-        if ty.is_ty_var() {
-            self.type_inference_vars.push(ty);
-        } else if ty.flags().intersects(rustc_type_ir::TypeFlags::HAS_TY_INFER) {
-            ty.super_visit_with(self);
-        } else {
-            // Fast path: don't visit inner types (e.g. generic arguments) when `flags` indicate
-            // that there are no placeholders.
-        }
-    }
-}
-
-pub fn collect_type_inference_vars<'db, T>(value: &T) -> Vec<Ty<'db>>
-where
-    T: ?Sized + rustc_type_ir::TypeVisitable<DbInterner<'db>>,
-{
-    let mut collector = TypeInferenceVarCollector { type_inference_vars: vec![] };
-    value.visit_with(&mut collector);
-    collector.type_inference_vars
-}
-
 pub fn known_const_to_ast<'db>(
     konst: Const<'db>,
     db: &'db dyn HirDatabase,
-    display_target: DisplayTarget,
+    target_module: ModuleId,
 ) -> Option<ConstArg> {
-    Some(make::expr_const_value(konst.display(db, display_target).to_string().as_str()))
+    Some(make::expr_const_value(
+        &konst.display_source_code(db, target_module, true).unwrap_or_else(|_| "_".to_owned()),
+    ))
 }
 
 /// A `Span` represents some location in lowered code - a type, expression or pattern.
@@ -701,6 +547,83 @@ impl Span {
     #[inline]
     pub fn is_dummy(&self) -> bool {
         matches!(self, Self::Dummy)
+    }
+}
+
+/// A [`DefWithBodyId`], or an anon const.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Supertype)]
+pub enum InferBodyId {
+    DefWithBodyId(DefWithBodyId),
+    AnonConstId(AnonConstId),
+}
+impl_from!(DefWithBodyId(FunctionId, ConstId, StaticId), AnonConstId for InferBodyId);
+impl From<EnumVariantId> for InferBodyId {
+    fn from(id: EnumVariantId) -> Self {
+        InferBodyId::DefWithBodyId(DefWithBodyId::VariantId(id))
+    }
+}
+
+impl HasModule for InferBodyId {
+    fn module(&self, db: &dyn DefDatabase) -> ModuleId {
+        match self {
+            InferBodyId::DefWithBodyId(id) => id.module(db),
+            InferBodyId::AnonConstId(id) => id.module(db),
+        }
+    }
+}
+
+impl HasResolver for InferBodyId {
+    fn resolver(self, db: &dyn DefDatabase) -> Resolver<'_> {
+        match self {
+            InferBodyId::DefWithBodyId(id) => id.resolver(db),
+            InferBodyId::AnonConstId(id) => id.resolver(db),
+        }
+    }
+}
+
+impl InferBodyId {
+    pub fn expression_store_owner(self, db: &dyn HirDatabase) -> ExpressionStoreOwnerId {
+        match self {
+            InferBodyId::DefWithBodyId(id) => id.into(),
+            InferBodyId::AnonConstId(id) => id.loc(db).owner,
+        }
+    }
+
+    pub fn generic_def(self, db: &dyn HirDatabase) -> GenericDefId {
+        match self {
+            InferBodyId::DefWithBodyId(id) => id.generic_def(db),
+            InferBodyId::AnonConstId(id) => id.loc(db).owner.generic_def(db),
+        }
+    }
+
+    #[inline]
+    pub fn as_function(self) -> Option<FunctionId> {
+        match self {
+            InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(it)) => Some(it),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_variant(self) -> Option<EnumVariantId> {
+        match self {
+            InferBodyId::DefWithBodyId(DefWithBodyId::VariantId(it)) => Some(it),
+            _ => None,
+        }
+    }
+
+    pub fn store_and_root_expr(self, db: &dyn HirDatabase) -> (&ExpressionStore, ExprId) {
+        match self {
+            InferBodyId::DefWithBodyId(id) => {
+                let body = Body::of(db, id);
+                (body, body.root_expr())
+            }
+            InferBodyId::AnonConstId(id) => {
+                let loc = id.loc(db);
+                let store = ExpressionStore::of(db, loc.owner);
+                (store, loc.expr)
+            }
+        }
     }
 }
 

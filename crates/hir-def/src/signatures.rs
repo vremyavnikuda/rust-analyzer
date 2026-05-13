@@ -1,6 +1,6 @@
 //! Item signature IR definitions
 
-use std::{cell::LazyCell, ops::Not as _};
+use std::cell::LazyCell;
 
 use bitflags::bitflags;
 use cfg::{CfgExpr, CfgOptions};
@@ -8,9 +8,9 @@ use hir_expand::{
     InFile, Intern, Lookup,
     name::{AsName, Name},
 };
-use intern::{Symbol, sym};
+use intern::sym;
 use la_arena::{Arena, Idx};
-use rustc_abi::{IntegerType, ReprOptions};
+use rustc_abi::{ExternAbi, IntegerType, ReprOptions};
 use syntax::{
     AstNode, NodeOrToken, SyntaxNodePtr, T,
     ast::{self, HasGenericParams, HasName, HasVisibility, IsString},
@@ -19,8 +19,9 @@ use thin_vec::ThinVec;
 use triomphe::Arc;
 
 use crate::{
-    ConstId, EnumId, EnumVariantId, EnumVariantLoc, ExternBlockId, FunctionId, HasModule, ImplId,
-    ItemContainerId, ModuleId, StaticId, StructId, TraitId, TypeAliasId, UnionId, VariantId,
+    ConstId, EnumId, EnumVariantId, EnumVariantLoc, ExternBlockId, FunctionId, FxIndexMap,
+    HasModule, ImplId, ItemContainerId, ModuleId, StaticId, StructId, TraitId, TypeAliasId,
+    UnionId, VariantId,
     attrs::AttrFlags,
     db::DefDatabase,
     expr_store::{
@@ -607,7 +608,7 @@ pub struct FunctionSignature {
     pub store: ExpressionStore,
     pub params: Box<[TypeRefId]>,
     pub ret_type: Option<TypeRefId>,
-    pub abi: Option<Symbol>,
+    pub abi: ExternAbi,
     pub flags: FnFlags,
 }
 
@@ -677,14 +678,18 @@ impl FunctionSignature {
             .abi()
             .map(|abi| {
                 abi.abi_string()
-                    .map_or_else(|| sym::C, |it| Symbol::intern(it.text_without_quotes()))
+                    .and_then(|abi| abi.text_without_quotes().parse().ok())
+                    .unwrap_or(ExternAbi::FALLBACK)
             })
             .or_else(|| match loc.container {
-                ItemContainerId::ExternBlockId(extern_block) => extern_block_abi(db, extern_block),
+                ItemContainerId::ExternBlockId(extern_block) => {
+                    Some(extern_block_abi(db, extern_block))
+                }
                 ItemContainerId::ModuleId(_)
                 | ItemContainerId::ImplId(_)
                 | ItemContainerId::TraitId(_) => None,
-            });
+            })
+            .unwrap_or(ExternAbi::Rust);
         let (store, source_map, generic_params, params, ret_type, self_param, variadic) =
             lower_function(db, module, source, id);
         if self_param {
@@ -771,8 +776,6 @@ impl FunctionSignature {
     pub fn is_intrinsic(db: &dyn DefDatabase, id: FunctionId) -> bool {
         let data = FunctionSignature::of(db, id);
         data.flags.contains(FnFlags::RUSTC_INTRINSIC)
-            // Keep this around for a bit until extern "rustc-intrinsic" abis are no longer used
-            || data.abi.as_ref().is_some_and(|abi| *abi == sym::rust_dash_intrinsic)
     }
 }
 
@@ -984,7 +987,7 @@ fn lower_fields<Field: ast::HasAttrs + ast::HasVisibility>(
     override_visibility: Option<Option<ast::Visibility>>,
 ) -> Option<(Arena<FieldData>, ExpressionStore, ExpressionStoreSourceMap)> {
     let cfg_options = module.krate(db).cfg_options(db);
-    let mut col = ExprCollector::signature(db, module, fields.file_id);
+    let mut col = ExprCollector::new(db, module, fields.file_id);
     let override_visibility = override_visibility.map(|vis| {
         LazyCell::new(|| {
             let span_map = db.span_map(fields.file_id);
@@ -1053,7 +1056,7 @@ pub struct InactiveEnumVariantCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumVariants {
-    pub variants: Box<[(EnumVariantId, Name, FieldsShape)]>,
+    pub variants: FxIndexMap<Name, (EnumVariantId, FieldsShape)>,
 }
 
 #[salsa::tracked]
@@ -1062,30 +1065,31 @@ impl EnumVariants {
     pub(crate) fn of(
         db: &dyn DefDatabase,
         e: EnumId,
-    ) -> (EnumVariants, Option<ThinVec<InactiveEnumVariantCode>>) {
+    ) -> (EnumVariants, ThinVec<InactiveEnumVariantCode>) {
         let loc = e.lookup(db);
         let source = loc.source(db);
         let ast_id_map = db.ast_id_map(source.file_id);
 
         let mut diagnostics = ThinVec::new();
         let cfg_options = loc.container.krate(db).cfg_options(db);
-        let mut index = 0;
         let Some(variants) = source.value.variant_list() else {
-            return (EnumVariants { variants: Box::default() }, None);
+            return (EnumVariants { variants: FxIndexMap::default() }, ThinVec::new());
         };
-        let variants = variants
+        let mut variants = variants
             .variants()
             .filter_map(|variant| {
                 let ast_id = ast_id_map.ast_id(&variant);
                 match AttrFlags::is_cfg_enabled_for(&variant, cfg_options) {
                     Ok(()) => {
-                        let enum_variant =
-                            EnumVariantLoc { id: source.with_value(ast_id), parent: e, index }
-                                .intern(db);
-                        index += 1;
                         let name = as_name_opt(variant.name());
+                        let enum_variant = EnumVariantLoc {
+                            id: source.with_value(ast_id),
+                            parent: e,
+                            name: name.clone(),
+                        }
+                        .intern(db);
                         let shape = adt_shape(variant.kind());
-                        Some((enum_variant, name, shape))
+                        Some((name, (enum_variant, shape)))
                     }
                     Err(cfg) => {
                         diagnostics.push(InactiveEnumVariantCode {
@@ -1097,34 +1101,38 @@ impl EnumVariants {
                     }
                 }
             })
-            .collect();
+            .collect::<FxIndexMap<_, _>>();
+        variants.shrink_to_fit();
+        diagnostics.shrink_to_fit();
 
-        (EnumVariants { variants }, diagnostics.is_empty().not().then_some(diagnostics))
+        (EnumVariants { variants }, diagnostics)
     }
 }
 
 impl EnumVariants {
     pub fn variant(&self, name: &Name) -> Option<EnumVariantId> {
-        self.variants.iter().find_map(|(v, n, _)| if n == name { Some(*v) } else { None })
+        self.variants.get(name).map(|&(id, _)| id)
     }
 
     pub fn variant_name_by_id(&self, variant_id: EnumVariantId) -> Option<Name> {
         self.variants
             .iter()
-            .find_map(|(id, name, _)| if *id == variant_id { Some(name.clone()) } else { None })
+            .find_map(|(name, (id, _))| if *id == variant_id { Some(name.clone()) } else { None })
     }
 
     // [Adopted from rustc](https://github.com/rust-lang/rust/blob/bd53aa3bf7a24a70d763182303bd75e5fc51a9af/compiler/rustc_middle/src/ty/adt.rs#L446-L448)
     pub fn is_payload_free(&self, db: &dyn DefDatabase) -> bool {
-        self.variants.iter().all(|&(v, _, _)| {
+        self.variants.values().all(|&(v, shape)| {
             // The condition check order is slightly modified from rustc
             // to improve performance by early returning with relatively fast checks
-            let variant = v.fields(db);
-            if !variant.fields().is_empty() {
-                return false;
-            }
+
             // The outer if condition is whether this variant has const ctor or not
-            if !matches!(variant.shape, FieldsShape::Unit) {
+            if !matches!(shape, FieldsShape::Unit) {
+                let variant = v.fields(db);
+                if !variant.fields().is_empty() {
+                    return false;
+                }
+
                 let body = Body::of(db, v.into());
                 // A variant with explicit discriminant
                 if !matches!(body[body.root_expr()], crate::hir::Expr::Missing) {
@@ -1136,16 +1144,12 @@ impl EnumVariants {
     }
 }
 
-pub(crate) fn extern_block_abi(
-    db: &dyn DefDatabase,
-    extern_block: ExternBlockId,
-) -> Option<Symbol> {
+#[salsa::tracked]
+pub(crate) fn extern_block_abi(db: &dyn DefDatabase, extern_block: ExternBlockId) -> ExternAbi {
     let source = extern_block.lookup(db).source(db);
-    source.value.abi().map(|abi| {
-        match abi.abi_string() {
-            Some(tok) => Symbol::intern(tok.text_without_quotes()),
-            // `extern` default to be `extern "C"`.
-            _ => sym::C,
-        }
-    })
+    source
+        .value
+        .abi()
+        .and_then(|abi| abi.abi_string()?.text_without_quotes().parse().ok())
+        .unwrap_or(ExternAbi::FALLBACK)
 }

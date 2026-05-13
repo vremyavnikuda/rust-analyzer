@@ -41,6 +41,7 @@ use hir_def::{
     resolver::ValueNs,
 };
 use macros::{TypeFoldable, TypeVisitable};
+use rustc_abi::ExternAbi;
 use rustc_ast_ir::Mutability;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use rustc_type_ir::{
@@ -52,7 +53,7 @@ use span::Edition;
 use tracing::{debug, instrument};
 
 use crate::{
-    FnAbi, Span,
+    Span,
     infer::{
         CaptureInfo, CaptureSourceStack, CapturedPlace, InferenceContext, UpvarCapture,
         closure::analysis::expr_use_visitor::{
@@ -195,7 +196,7 @@ type InferredCaptureInformation = Vec<(Place, CaptureInfo)>;
 
 impl<'a, 'db> InferenceContext<'a, 'db> {
     pub(crate) fn closure_analyze(&mut self) {
-        let upvars = crate::upvars::upvars_mentioned(self.db, self.owner)
+        let upvars = crate::upvars::upvars_mentioned(self.db, self.store_owner)
             .unwrap_or(const { &FxHashMap::with_hasher(FxBuildHasher) });
         for root_expr in self.store.expr_roots() {
             self.analyze_closures_in_expr(root_expr, upvars);
@@ -329,7 +330,8 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                 let Expr::Path(path) = &self.store[init] else {
                     panic!();
                 };
-                let update_guard = self.resolver.update_to_inner_scope(self.db, self.owner, init);
+                let update_guard =
+                    self.resolver.update_to_inner_scope(self.db, self.store_owner, init);
                 let Some(ValueNs::LocalBinding(local_id)) =
                     self.resolver.resolve_path_in_value_ns_fully(
                         self.db,
@@ -458,7 +460,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                         tupled_upvars_ty_for_borrow,
                         false,
                         Safety::Safe,
-                        FnAbi::Rust,
+                        ExternAbi::Rust,
                     ),
                     self.types.coroutine_captures_by_ref_bound_var_kinds,
                 ),
@@ -918,8 +920,8 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         self.result.closures_data.insert(closure_def_id, closure_data);
     }
 
-    fn normalize_capture_place(&self, span: Span, place: Place) -> Place {
-        let mut place = self.infcx().resolve_vars_if_possible(place);
+    fn normalize_capture_place(&mut self, span: Span, place: Place) -> Place {
+        let place = self.infcx().resolve_vars_if_possible(place);
 
         // In the new solver, types in HIR `Place`s can contain unnormalized aliases,
         // which can ICE later (e.g. when projecting fields for diagnostics).
@@ -943,11 +945,8 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                 }
                 normalized
             }
-            Err(_errors) => {
-                place.base_ty = self.types.types.error.store();
-                for proj in &mut place.projections {
-                    proj.ty = self.types.types.error.store();
-                }
+            Err(errors) => {
+                self.table.trait_errors.extend(errors);
                 place
             }
         }
@@ -1000,7 +999,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         }
     }
 
-    fn place_for_root_variable(&self, closure_def_id: ExprId, var_hir_id: BindingId) -> Place {
+    fn place_for_root_variable(&mut self, closure_def_id: ExprId, var_hir_id: BindingId) -> Place {
         let place = Place {
             base_ty: self.result.binding_ty(var_hir_id).store(),
             base: PlaceBase::Upvar { closure: closure_def_id, var_id: var_hir_id },

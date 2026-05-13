@@ -69,20 +69,20 @@ pub use tt;
 
 #[macro_export]
 macro_rules! impl_intern_lookup {
-    ($db:ident, $id:ident, $loc:ident, $intern:ident, $lookup:ident) => {
+    ($db:ident, $id:ident, $loc:ident) => {
         impl $crate::Intern for $loc {
             type Database = dyn $db;
             type ID = $id;
             fn intern(self, db: &Self::Database) -> Self::ID {
-                db.$intern(self)
+                $id::new(db, self)
             }
         }
 
         impl $crate::Lookup for $id {
             type Database = dyn $db;
             type Data = $loc;
-            fn lookup(&self, db: &Self::Database) -> Self::Data {
-                db.$lookup(*self)
+            fn lookup<'db>(&self, db: &'db Self::Database) -> &'db Self::Data {
+                self.loc(db)
             }
         }
     };
@@ -98,16 +98,10 @@ pub trait Intern {
 pub trait Lookup {
     type Database: ?Sized;
     type Data;
-    fn lookup(&self, db: &Self::Database) -> Self::Data;
+    fn lookup<'db>(&self, db: &'db Self::Database) -> &'db Self::Data;
 }
 
-impl_intern_lookup!(
-    ExpandDatabase,
-    MacroCallId,
-    MacroCallLoc,
-    intern_macro_call,
-    lookup_intern_macro_call
-);
+impl_intern_lookup!(ExpandDatabase, MacroCallId, MacroCallLoc);
 
 pub type ExpandResult<T> = ValueResult<T, ExpandError>;
 
@@ -386,7 +380,7 @@ impl HirFileId {
     pub fn edition(self, db: &dyn ExpandDatabase) -> Edition {
         match self {
             HirFileId::FileId(file_id) => file_id.edition(db),
-            HirFileId::MacroFile(m) => db.lookup_intern_macro_call(m).def.edition,
+            HirFileId::MacroFile(m) => m.loc(db).def.edition,
         }
     }
     pub fn original_file(self, db: &dyn ExpandDatabase) -> EditionedFileId {
@@ -395,7 +389,7 @@ impl HirFileId {
             match file_id {
                 HirFileId::FileId(id) => break id,
                 HirFileId::MacroFile(macro_call_id) => {
-                    file_id = db.lookup_intern_macro_call(macro_call_id).kind.file_id()
+                    file_id = macro_call_id.loc(db).kind.file_id()
                 }
             }
         }
@@ -406,7 +400,7 @@ impl HirFileId {
             match self {
                 HirFileId::FileId(id) => break id,
                 HirFileId::MacroFile(file) => {
-                    let loc = db.lookup_intern_macro_call(file);
+                    let loc = file.loc(db);
                     if loc.def.is_include()
                         && let MacroCallKind::FnLike { eager: Some(eager), .. } = &loc.kind
                         && let Ok(it) = include_input_to_file_id(db, file, &eager.arg)
@@ -420,21 +414,21 @@ impl HirFileId {
     }
 
     pub fn original_call_node(self, db: &dyn ExpandDatabase) -> Option<InRealFile<SyntaxNode>> {
-        let mut call = db.lookup_intern_macro_call(self.macro_file()?).to_node(db);
+        let mut call = self.macro_file()?.loc(db).to_node(db);
         loop {
             match call.file_id {
                 HirFileId::FileId(file_id) => {
                     break Some(InRealFile { file_id, value: call.value });
                 }
                 HirFileId::MacroFile(macro_call_id) => {
-                    call = db.lookup_intern_macro_call(macro_call_id).to_node(db);
+                    call = macro_call_id.loc(db).to_node(db);
                 }
             }
         }
     }
 
     pub fn call_node(self, db: &dyn ExpandDatabase) -> Option<InFile<SyntaxNode>> {
-        Some(db.lookup_intern_macro_call(self.macro_file()?).to_node(db))
+        Some(self.macro_file()?.loc(db).to_node(db))
     }
 
     pub fn as_builtin_derive_attr_node(
@@ -442,7 +436,7 @@ impl HirFileId {
         db: &dyn ExpandDatabase,
     ) -> Option<InFile<ast::Attr>> {
         let macro_file = self.macro_file()?;
-        let loc = db.lookup_intern_macro_call(macro_file);
+        let loc = macro_file.loc(db);
         let attr = match loc.def.kind {
             MacroDefKind::BuiltInDerive(..) => loc.to_node(db),
             _ => return None,
@@ -471,13 +465,13 @@ pub enum MacroKind {
 
 impl MacroCallId {
     pub fn call_node(self, db: &dyn ExpandDatabase) -> InFile<SyntaxNode> {
-        db.lookup_intern_macro_call(self).to_node(db)
+        self.loc(db).to_node(db)
     }
     pub fn expansion_level(self, db: &dyn ExpandDatabase) -> u32 {
         let mut level = 0;
         let mut macro_file = self;
         loop {
-            let loc = db.lookup_intern_macro_call(macro_file);
+            let loc = macro_file.loc(db);
 
             level += 1;
             macro_file = match loc.kind.file_id() {
@@ -487,7 +481,7 @@ impl MacroCallId {
         }
     }
     pub fn parent(self, db: &dyn ExpandDatabase) -> HirFileId {
-        db.lookup_intern_macro_call(self).kind.file_id()
+        self.loc(db).kind.file_id()
     }
 
     /// Return expansion information if it is a macro-expansion file
@@ -496,7 +490,7 @@ impl MacroCallId {
     }
 
     pub fn kind(self, db: &dyn ExpandDatabase) -> MacroKind {
-        match db.lookup_intern_macro_call(self).def.kind {
+        match self.loc(db).def.kind {
             MacroDefKind::Declarative(..) => MacroKind::Declarative,
             MacroDefKind::BuiltIn(..) | MacroDefKind::BuiltInEager(..) => {
                 MacroKind::DeclarativeBuiltIn
@@ -510,24 +504,24 @@ impl MacroCallId {
     }
 
     pub fn is_include_macro(self, db: &dyn ExpandDatabase) -> bool {
-        db.lookup_intern_macro_call(self).def.is_include()
+        self.loc(db).def.is_include()
     }
 
     pub fn is_include_like_macro(self, db: &dyn ExpandDatabase) -> bool {
-        db.lookup_intern_macro_call(self).def.is_include_like()
+        self.loc(db).def.is_include_like()
     }
 
     pub fn is_env_or_option_env(self, db: &dyn ExpandDatabase) -> bool {
-        db.lookup_intern_macro_call(self).def.is_env_or_option_env()
+        self.loc(db).def.is_env_or_option_env()
     }
 
     pub fn is_eager(self, db: &dyn ExpandDatabase) -> bool {
-        let loc = db.lookup_intern_macro_call(self);
+        let loc = self.loc(db);
         matches!(loc.def.kind, MacroDefKind::BuiltInEager(..))
     }
 
     pub fn eager_arg(self, db: &dyn ExpandDatabase) -> Option<MacroCallId> {
-        let loc = db.lookup_intern_macro_call(self);
+        let loc = self.loc(db);
         match &loc.kind {
             MacroCallKind::FnLike { eager, .. } => eager.as_ref().map(|it| it.arg_id),
             _ => None,
@@ -535,7 +529,7 @@ impl MacroCallId {
     }
 
     pub fn is_derive_attr_pseudo_expansion(self, db: &dyn ExpandDatabase) -> bool {
-        let loc = db.lookup_intern_macro_call(self);
+        let loc = self.loc(db);
         loc.def.is_attribute_derive()
     }
 }
@@ -548,7 +542,7 @@ impl MacroDefId {
         kind: MacroCallKind,
         ctxt: SyntaxContext,
     ) -> MacroCallId {
-        db.intern_macro_call(MacroCallLoc { def: self, krate, kind, ctxt })
+        MacroCallId::new(db, MacroCallLoc { def: self, krate, kind, ctxt })
     }
 
     pub fn definition_range(&self, db: &dyn ExpandDatabase) -> InFile<TextRange> {
@@ -720,24 +714,27 @@ impl MacroCallKind {
     /// - fn_like! {}, it spans the path and token tree
     /// - #\[derive], it spans the `#[derive(...)]` attribute and the annotated item
     /// - #\[attr], it spans the `#[attr(...)]` attribute and the annotated item
-    pub fn original_call_range_with_input(self, db: &dyn ExpandDatabase) -> FileRange {
-        let mut kind = self;
+    pub fn original_call_range_with_input(&self, db: &dyn ExpandDatabase) -> FileRange {
+        let get_range = |kind: &_| match kind {
+            MacroCallKind::FnLike { ast_id, .. } => ast_id.erase(),
+            MacroCallKind::Derive { ast_id, .. } => ast_id.erase(),
+            MacroCallKind::Attr { ast_id, .. } => ast_id.erase(),
+        };
+
+        let mut ast_id = get_range(self);
+        let mut file_id = self.file_id();
         let file_id = loop {
-            match kind.file_id() {
+            match file_id {
                 HirFileId::MacroFile(file) => {
-                    kind = db.lookup_intern_macro_call(file).kind;
+                    let kind = &file.loc(db).kind;
+                    ast_id = get_range(kind);
+                    file_id = kind.file_id();
                 }
                 HirFileId::FileId(file_id) => break file_id,
             }
         };
 
-        let range = match kind {
-            MacroCallKind::FnLike { ast_id, .. } => ast_id.to_ptr(db).text_range(),
-            MacroCallKind::Derive { ast_id, .. } => ast_id.to_ptr(db).text_range(),
-            MacroCallKind::Attr { ast_id, .. } => ast_id.to_ptr(db).text_range(),
-        };
-
-        FileRange { range, file_id }
+        FileRange { range: ast_id.to_ptr(db).text_range(), file_id }
     }
 
     /// Returns the original file range that best describes the location of this macro call.
@@ -745,18 +742,8 @@ impl MacroCallKind {
     /// Here we try to roughly match what rustc does to improve diagnostics: fn-like macros
     /// get the macro path (rustc shows the whole `ast::MacroCall`), attribute macros get the
     /// attribute's range, and derives get only the specific derive that is being referred to.
-    pub fn original_call_range(self, db: &dyn ExpandDatabase, krate: Crate) -> FileRange {
-        let mut kind = self;
-        let file_id = loop {
-            match kind.file_id() {
-                HirFileId::MacroFile(file) => {
-                    kind = db.lookup_intern_macro_call(file).kind;
-                }
-                HirFileId::FileId(file_id) => break file_id,
-            }
-        };
-
-        let range = match kind {
+    pub fn original_call_range(&self, db: &dyn ExpandDatabase, krate: Crate) -> FileRange {
+        let get_range = |kind: &_| match kind {
             MacroCallKind::FnLike { ast_id, .. } => {
                 let node = ast_id.to_node(db);
                 node.path()
@@ -767,11 +754,24 @@ impl MacroCallKind {
             }
             MacroCallKind::Derive { ast_id, derive_attr_index, .. } => {
                 // FIXME: should be the range of the macro name, not the whole derive
-                derive_attr_index.find_attr_range(db, krate, ast_id).1.syntax().text_range()
+                derive_attr_index.find_attr_range(db, krate, *ast_id).1.syntax().text_range()
             }
             // FIXME: handle `cfg_attr`
             MacroCallKind::Attr { ast_id, censored_attr_ids: attr_ids, .. } => {
-                attr_ids.invoc_attr().find_attr_range(db, krate, ast_id).1.syntax().text_range()
+                attr_ids.invoc_attr().find_attr_range(db, krate, *ast_id).1.syntax().text_range()
+            }
+        };
+
+        let mut range = get_range(self);
+        let mut file_id = self.file_id();
+        let file_id = loop {
+            match file_id {
+                HirFileId::MacroFile(file) => {
+                    let kind = &file.loc(db).kind;
+                    range = get_range(kind);
+                    file_id = kind.file_id();
+                }
+                HirFileId::FileId(file_id) => break file_id,
             }
         };
 
@@ -803,7 +803,7 @@ pub struct ExpansionInfo<'db> {
     arg: InFile<Option<SyntaxNode>>,
     exp_map: &'db ExpansionSpanMap,
     arg_map: SpanMap<'db>,
-    loc: MacroCallLoc,
+    loc: &'db MacroCallLoc,
 }
 
 impl<'db> ExpansionInfo<'db> {
@@ -920,7 +920,7 @@ impl<'db> ExpansionInfo<'db> {
 
     pub fn new(db: &'db dyn ExpandDatabase, macro_file: MacroCallId) -> ExpansionInfo<'db> {
         let _p = tracing::info_span!("ExpansionInfo::new").entered();
-        let loc = db.lookup_intern_macro_call(macro_file);
+        let loc = macro_file.loc(db);
 
         let arg_tt = loc.kind.arg(db);
         let arg_map = db.span_map(arg_tt.file_id);
@@ -1054,9 +1054,15 @@ impl ExpandTo {
 
 intern::impl_internable!(ModPath);
 
+/// Macro ids. That's probably the tricksiest bit in rust-analyzer, and the
+/// reason why we use salsa at all.
+///
+/// We encode macro definitions into ids of macro calls, this what allows us
+/// to be incremental.
 #[salsa_macros::interned(no_lifetime, debug, revisions = usize::MAX)]
 #[doc(alias = "MacroFileId")]
 pub struct MacroCallId {
+    #[returns(ref)]
     pub loc: MacroCallLoc,
 }
 

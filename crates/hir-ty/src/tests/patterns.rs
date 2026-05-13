@@ -417,8 +417,6 @@ fn infer_pattern_match_byte_string_literal() {
             254..256 '&v': &'? [u8; 3]
             255..256 'v': [u8; 3]
             257..259 '{}': ()
-            199..200 '3': usize
-            62..63 'N': usize
         "#]],
     );
 }
@@ -1303,5 +1301,61 @@ fn bar() {
     (ext, v) = foo();
 }
     "#,
+    );
+}
+
+#[test]
+fn deref_pattern() {
+    check_infer(
+        r#"
+//- minicore: deref_pat
+use core::ops::{Deref, DerefPure};
+
+#[lang = "owned_box"]
+pub struct Box<T>(T);
+impl<T> Deref for Box<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        loop {}
+    }
+}
+impl<T> DerefPure for Box<T> {}
+
+pub struct Foo<T>(T);
+impl<T> Deref for Foo<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        loop {}
+    }
+}
+impl<T> DerefPure for Foo<T> {}
+
+fn foo(v: &Box<Foo<i32>>) {
+    match v {
+        deref!(deref!(inner)) => {}
+        _ => {}
+    }
+}
+    "#,
+        expect![[r#"
+            142..146 'self': &'? Box<T>
+            165..188 '{     ...     }': &'? T
+            175..182 'loop {}': !
+            180..182 '{}': ()
+            310..314 'self': &'? Foo<T>
+            333..356 '{     ...     }': &'? [T]
+            343..350 'loop {}': !
+            348..350 '{}': ()
+            !0..20 'builti...inner)': Foo<i32>
+            !0..28 'builti...nner))': Box<Foo<i32>>
+            !14..19 'inner': &'? [i32]
+            399..400 'v': &'? Box<Foo<i32>>
+            418..493 '{     ...   } }': ()
+            424..491 'match ...     }': ()
+            430..431 'v': &'? Box<Foo<i32>>
+            467..469 '{}': ()
+            478..479 '_': &'? Box<Foo<i32>>
+            483..485 '{}': ()
+        "#]],
     );
 }

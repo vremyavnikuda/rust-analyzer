@@ -29,7 +29,7 @@ pub(crate) fn representability(db: &dyn HirDatabase, id: AdtId) -> Representabil
         AdtId::StructId(id) => variant_representability(db, id.into()),
         AdtId::UnionId(id) => variant_representability(db, id.into()),
         AdtId::EnumId(id) => {
-            for &(variant, ..) in &id.enum_variants(db).variants {
+            for &(variant, ..) in id.enum_variants(db).variants.values() {
                 rtry!(variant_representability(db, variant.into()));
             }
             Representability::Representable
@@ -47,7 +47,7 @@ pub(crate) fn representability_cycle(
 
 fn variant_representability(db: &dyn HirDatabase, id: VariantId) -> Representability {
     for ty in db.field_types(id).values() {
-        rtry!(representability_ty(db, ty.get().instantiate_identity()));
+        rtry!(representability_ty(db, ty.get().instantiate_identity().skip_norm_wip()));
     }
     Representability::Representable
 }
@@ -94,14 +94,18 @@ fn params_in_repr(db: &dyn HirDatabase, def_id: AdtId) -> Box<[bool]> {
         .collect::<Box<[bool]>>();
     let mut handle_variant = |variant| {
         for field in db.field_types(variant).values() {
-            params_in_repr_ty(db, field.get().instantiate_identity(), &mut params_in_repr);
+            params_in_repr_ty(
+                db,
+                field.get().instantiate_identity().skip_norm_wip(),
+                &mut params_in_repr,
+            );
         }
     };
     match def_id {
         AdtId::StructId(def_id) => handle_variant(def_id.into()),
         AdtId::UnionId(def_id) => handle_variant(def_id.into()),
         AdtId::EnumId(def_id) => {
-            for &(variant, ..) in &def_id.enum_variants(db).variants {
+            for &(variant, ..) in def_id.enum_variants(db).variants.values() {
                 handle_variant(variant.into());
             }
         }

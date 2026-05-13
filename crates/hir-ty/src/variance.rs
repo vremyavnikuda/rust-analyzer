@@ -126,7 +126,7 @@ impl<'db> Context<'db> {
                 let mut add_constraints_from_variant = |variant| {
                     for (_, field) in db.field_types(variant).iter() {
                         self.add_constraints_from_ty(
-                            field.get().instantiate_identity(),
+                            field.get().instantiate_identity().skip_norm_wip(),
                             Variance::Covariant,
                         );
                     }
@@ -135,7 +135,7 @@ impl<'db> Context<'db> {
                     AdtId::StructId(s) => add_constraints_from_variant(VariantId::StructId(s)),
                     AdtId::UnionId(u) => add_constraints_from_variant(VariantId::UnionId(u)),
                     AdtId::EnumId(e) => {
-                        e.enum_variants(db).variants.iter().for_each(|&(variant, _, _)| {
+                        e.enum_variants(db).variants.values().for_each(|&(variant, _)| {
                             add_constraints_from_variant(VariantId::EnumVariantId(variant))
                         });
                     }
@@ -476,7 +476,6 @@ struct Other<'a> {
 
     #[test]
     fn rustc_test_variance_associated_consts() {
-        // FIXME: Should be invariant
         check(
             r#"
 trait Trait {
@@ -488,7 +487,7 @@ struct Foo<T: Trait> { //~ ERROR [T: o]
 }
 "#,
             expect![[r#"
-                Foo[T: bivariant]
+                Foo[T: invariant]
             "#]],
         );
     }

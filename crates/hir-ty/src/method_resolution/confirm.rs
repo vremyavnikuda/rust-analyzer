@@ -27,7 +27,7 @@ use crate::{
     next_solver::{
         Binder, Clause, ClauseKind, Const, DbInterner, EarlyParamRegion, ErrorGuaranteed, FnSig,
         GenericArg, GenericArgs, ParamConst, PolyExistentialTraitRef, PolyTraitRef, Region,
-        TraitRef, Ty, TyKind,
+        TraitRef, Ty, TyKind, Unnormalized,
         infer::{
             BoundRegionConversionTime, InferCtxt,
             traits::{ObligationCause, PredicateObligation},
@@ -137,7 +137,8 @@ impl<'a, 'b, 'db> ConfirmContext<'a, 'b, 'db> {
         );
         let illegal_sized_bound = self.predicates_require_illegal_sized_bound(
             GenericPredicates::query_all(self.db(), self.candidate.into())
-                .iter_instantiated(self.interner(), filler_args.as_slice()),
+                .iter_instantiated(self.interner(), filler_args.as_slice())
+                .map(Unnormalized::skip_norm_wip),
         );
 
         // Unify the (adjusted) self type with what the method expects.
@@ -403,7 +404,7 @@ impl<'a, 'b, 'db> ConfirmContext<'a, 'b, 'db> {
                             unreachable!("non-const param ID for const param");
                         };
                         let const_ty = self.ctx.db.const_param_ty(const_id);
-                        self.ctx.make_body_const(*konst, const_ty).into()
+                        self.ctx.create_body_anon_const(konst.expr, const_ty, false).into()
                     }
                     _ => unreachable!("unmatching param kinds were passed to `provided_kind()`"),
                 }
@@ -411,14 +412,12 @@ impl<'a, 'b, 'db> ConfirmContext<'a, 'b, 'db> {
 
             fn provided_type_like_const(
                 &mut self,
-                type_ref: TypeRefId,
-                const_ty: Ty<'db>,
+                _type_ref: TypeRefId,
+                _const_ty: Ty<'db>,
                 arg: TypeLikeConst<'_>,
             ) -> Const<'db> {
                 match arg {
-                    TypeLikeConst::Path(path) => {
-                        self.ctx.make_path_as_body_const(type_ref, path, const_ty)
-                    }
+                    TypeLikeConst::Path(path) => self.ctx.make_path_as_body_const(path),
                     TypeLikeConst::Infer => self.ctx.table.next_const_var(Span::Dummy),
                 }
             }
@@ -428,12 +427,15 @@ impl<'a, 'b, 'db> ConfirmContext<'a, 'b, 'db> {
                 _def: GenericDefId,
                 param_id: GenericParamId,
                 _param: GenericParamDataRef<'_>,
-                _infer_args: bool,
+                infer_args: bool,
                 _preceding_args: &[GenericArg<'db>],
+                had_count_error: bool,
             ) -> GenericArg<'db> {
                 // Always create an inference var, even when `infer_args == false`. This helps with diagnostics,
                 // and I think it's also required in the presence of `impl Trait` (that must be inferred).
-                self.ctx.table.var_for_def(param_id, Span::Dummy)
+                let span =
+                    if !infer_args || had_count_error { Span::Dummy } else { self.expr.into() };
+                self.ctx.table.var_for_def(param_id, span)
             }
 
             fn parent_arg(&mut self, param_idx: u32, _param_id: GenericParamId) -> GenericArg<'db> {
@@ -514,13 +516,17 @@ impl<'a, 'b, 'db> ConfirmContext<'a, 'b, 'db> {
         let def_id = self.candidate;
         let method_predicates = clauses_as_obligations(
             GenericPredicates::query_all(self.db(), def_id.into())
-                .iter_instantiated(self.interner(), all_args),
+                .iter_instantiated(self.interner(), all_args)
+                .map(Unnormalized::skip_norm_wip),
             ObligationCause::new(self.call_expr),
             self.ctx.table.param_env,
         );
 
-        let sig =
-            self.db().callable_item_signature(def_id.into()).instantiate(self.interner(), all_args);
+        let sig = self
+            .db()
+            .callable_item_signature(def_id.into())
+            .instantiate(self.interner(), all_args)
+            .skip_norm_wip();
         debug!("type scheme instantiated, sig={:?}", sig);
 
         let sig = self.instantiate_binder_with_fresh_vars(sig);

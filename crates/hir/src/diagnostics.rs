@@ -103,7 +103,9 @@ diagnostics![AnyDiagnostic<'db> ->
     AwaitOutsideOfAsync,
     BreakOutsideOfLoop,
     CastToUnsized<'db>,
+    ExpectedArrayOrSlicePat<'db>,
     ExpectedFunction<'db>,
+    FunctionalRecordUpdateOnNonStruct,
     GenericDefaultRefersToSelf,
     InactiveCode,
     IncoherentImpl,
@@ -113,6 +115,7 @@ diagnostics![AnyDiagnostic<'db> ->
     InvalidCast<'db>,
     InvalidDeriveTarget,
     InvalidLhsOfAssignment,
+    InvalidRangePatType,
     MacroDefError,
     MacroError,
     MacroExpansionParseError,
@@ -296,9 +299,25 @@ pub struct MismatchedArrayPatLen {
 }
 
 #[derive(Debug)]
+pub struct ExpectedArrayOrSlicePat<'db> {
+    pub pat: InFile<ExprOrPatPtr>,
+    pub found: Type<'db>,
+}
+
+#[derive(Debug)]
+pub struct InvalidRangePatType {
+    pub pat: InFile<ExprOrPatPtr>,
+}
+
+#[derive(Debug)]
 pub struct ExpectedFunction<'db> {
     pub call: InFile<ExprOrPatPtr>,
     pub found: Type<'db>,
+}
+
+#[derive(Debug)]
+pub struct FunctionalRecordUpdateOnNonStruct {
+    pub base_expr: InFile<ExprOrPatPtr>,
 }
 
 #[derive(Debug)]
@@ -771,6 +790,14 @@ impl<'db> AnyDiagnostic<'db> {
                 let pat = pat_syntax(pat)?.map(Into::into);
                 MismatchedArrayPatLen { pat, expected, found, has_rest }.into()
             }
+            InferenceDiagnostic::ExpectedArrayOrSlicePat { pat, found } => {
+                let pat = pat_syntax(*pat)?.map(Into::into);
+                ExpectedArrayOrSlicePat { pat, found: Type::new(db, def, found.as_ref()) }.into()
+            }
+            &InferenceDiagnostic::InvalidRangePatType { pat } => {
+                let pat = pat_syntax(pat)?.map(Into::into);
+                InvalidRangePatType { pat }.into()
+            }
             &InferenceDiagnostic::DuplicateField { field: expr, variant } => {
                 let expr_or_pat = match expr {
                     ExprOrPatId::ExprId(expr) => {
@@ -854,6 +881,9 @@ impl<'db> AnyDiagnostic<'db> {
             }
             &InferenceDiagnostic::NonExhaustiveRecordExpr { expr } => {
                 NonExhaustiveRecordExpr { expr: expr_syntax(expr)? }.into()
+            }
+            &InferenceDiagnostic::FunctionalRecordUpdateOnNonStruct { base_expr } => {
+                FunctionalRecordUpdateOnNonStruct { base_expr: expr_syntax(base_expr)? }.into()
             }
             InferenceDiagnostic::TypedHole { expr, expected } => {
                 let expr = expr_syntax(*expr)?;

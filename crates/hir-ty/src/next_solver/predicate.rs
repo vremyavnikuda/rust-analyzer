@@ -229,7 +229,7 @@ impl<'db> Predicate<'db> {
     /// Flips the polarity of a Predicate.
     ///
     /// Given `T: Trait` predicate it returns `T: !Trait` and given `T: !Trait` returns `T: Trait`.
-    pub fn flip_polarity(self) -> Option<Predicate<'db>> {
+    pub fn flip_polarity(self, interner: DbInterner<'db>) -> Option<Predicate<'db>> {
         let kind = self
             .kind()
             .map_bound(|kind| match kind {
@@ -245,7 +245,7 @@ impl<'db> Predicate<'db> {
             })
             .transpose()?;
 
-        Some(Predicate::new(DbInterner::conjure(), kind))
+        Some(Predicate::new(interner, kind))
     }
 }
 
@@ -355,13 +355,6 @@ impl<'db> rustc_type_ir::inherent::SliceLike for Clauses<'db> {
     }
 }
 
-impl<'db> Default for Clauses<'db> {
-    #[inline]
-    fn default() -> Self {
-        Clauses::empty(DbInterner::conjure())
-    }
-}
-
 impl<'db> rustc_type_ir::inherent::Clauses<DbInterner<'db>> for Clauses<'db> {}
 
 impl<'db> rustc_type_ir::TypeSuperFoldable<DbInterner<'db>> for Clauses<'db> {
@@ -444,8 +437,8 @@ pub struct ParamEnv<'db> {
 }
 
 impl<'db> ParamEnv<'db> {
-    pub fn empty() -> Self {
-        ParamEnv { clauses: Clauses::empty(DbInterner::conjure()) }
+    pub fn empty(interner: DbInterner<'db>) -> Self {
+        ParamEnv { clauses: Clauses::empty(interner) }
     }
 
     pub fn clauses(self) -> Clauses<'db> {
@@ -885,7 +878,9 @@ impl<'db> rustc_type_ir::inherent::Clause<DbInterner<'db>> for Clause<'db> {
         let shifted_pred =
             cx.shift_bound_var_indices(trait_bound_vars.len(), bound_pred.skip_binder());
         // 2) Self: Bar1<'a, '^0.1> -> T: Bar1<'^0.0, '^0.1>
-        let new = EarlyBinder::bind(shifted_pred).instantiate(cx, trait_ref.skip_binder().args);
+        let new = EarlyBinder::bind(shifted_pred)
+            .instantiate(cx, trait_ref.skip_binder().args)
+            .skip_norm_wip();
         // 3) ['x] + ['b] -> ['x, 'b]
         let bound_vars =
             BoundVarKinds::new_from_iter(cx, trait_bound_vars.iter().chain(pred_bound_vars.iter()));

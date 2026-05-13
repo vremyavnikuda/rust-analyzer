@@ -11,7 +11,7 @@ use base_db::{Crate, FxIndexMap};
 use either::Either;
 use hir_def::{
     ExpressionStoreOwnerId, FindPathConfig, GenericDefId, GenericParamId, HasModule,
-    ItemContainerId, LocalFieldId, Lookup, ModuleDefId, ModuleId, TraitId,
+    ItemContainerId, LocalFieldId, Lookup, ModuleDefId, ModuleId, TraitId, TypeAliasId,
     expr_store::{ExpressionStore, path::Path},
     find_path::{self, PrefixKind},
     hir::{
@@ -22,8 +22,8 @@ use hir_def::{
     item_tree::FieldsShape,
     lang_item::LangItems,
     signatures::{
-        EnumSignature, FunctionSignature, StructSignature, TraitSignature, TypeAliasSignature,
-        UnionSignature, VariantFields,
+        ConstSignature, EnumSignature, FunctionSignature, StaticSignature, StructSignature,
+        TraitSignature, TypeAliasSignature, UnionSignature, VariantFields,
     },
     type_ref::{
         ConstRef, LifetimeRef, LifetimeRefId, TraitBoundModifier, TypeBound, TypeRef, TypeRefId,
@@ -35,6 +35,7 @@ use hir_expand::{mod_path::PathKind, name::Name};
 use intern::{Internable, Interned, sym};
 use itertools::Itertools;
 use la_arena::ArenaMap;
+use rustc_abi::ExternAbi;
 use rustc_apfloat::{
     Float,
     ieee::{Half as f16, Quad as f128},
@@ -50,8 +51,8 @@ use span::Edition;
 use stdx::never;
 
 use crate::{
-    CallableDefId, FnAbi, ImplTraitId, MemoryMap, ParamEnvAndCrate, consteval,
-    db::HirDatabase,
+    CallableDefId, ImplTraitId, MemoryMap, ParamEnvAndCrate, consteval,
+    db::{GeneralConstId, HirDatabase},
     generics::{ProvenanceSplit, generics},
     layout::Layout,
     lower::GenericPredicates,
@@ -59,8 +60,8 @@ use crate::{
     next_solver::{
         AliasTy, Allocation, Clause, ClauseKind, Const, ConstKind, DbInterner,
         ExistentialPredicate, FnSig, GenericArg, GenericArgKind, GenericArgs, ParamEnv, PolyFnSig,
-        Region, SolverDefId, StoredEarlyBinder, StoredTy, Term, TermKind, TraitPredicate, TraitRef,
-        Ty, TyKind, TypingMode, ValTree,
+        Region, StoredEarlyBinder, StoredTy, Term, TermId, TermKind, TraitPredicate, TraitRef, Ty,
+        TyKind, TypingMode, Unnormalized, ValTree,
         abi::Safety,
         infer::{DbInternerInferExt, traits::ObligationCause},
     },
@@ -190,7 +191,7 @@ impl<'db> HirFormatter<'_, 'db> {
             } else {
                 match target.kind {
                     AliasTyKind::Projection { def_id } => {
-                        let def_id = def_id.expect_type_alias();
+                        let def_id = def_id.0;
                         let ItemContainerId::TraitId(trait_) = def_id.loc(self.db).container else {
                             panic!("expected an assoc type");
                         };
@@ -653,6 +654,7 @@ fn write_projection<'db>(
     f: &mut HirFormatter<'_, 'db>,
     alias: &AliasTy<'db>,
     needs_parens_if_multi: bool,
+    def_id: TypeAliasId,
 ) -> Result {
     f.format_bounds_with(*alias, |f| {
         if f.should_truncate() {
@@ -671,6 +673,7 @@ fn write_projection<'db>(
             // `GenericDefId` from the formatted type (store it inside the `HirFormatter`).
             let bounds = GenericPredicates::query_all(f.db, param.id.parent())
                 .iter_identity()
+                .map(Unnormalized::skip_norm_wip)
                 .filter(|wc| {
                     let ty = match wc.kind().skip_binder() {
                         ClauseKind::Trait(tr) => tr.self_ty(),
@@ -699,13 +702,7 @@ fn write_projection<'db>(
         self_ty.hir_fmt(f)?;
         write!(f, " as ")?;
         trait_ref.hir_fmt(f)?;
-        write!(
-            f,
-            ">::{}",
-            TypeAliasSignature::of(f.db, alias.kind.def_id().expect_type_alias())
-                .name
-                .display(f.db, f.edition())
-        )?;
+        write!(f, ">::{}", TypeAliasSignature::of(f.db, def_id).name.display(f.db, f.edition()))?;
         let proj_params = &alias.args.as_slice()[trait_ref.args.len()..];
         hir_fmt_generics(f, proj_params, None, None)
     })
@@ -749,7 +746,25 @@ impl<'db> HirDisplay<'db> for Const<'db> {
             ConstKind::Value(value) => render_const_scalar_from_valtree(f, value.ty, value.value),
             ConstKind::Unevaluated(unev) => {
                 let c = unev.def.0;
-                write!(f, "{}", c.name(f.db))?;
+                match c {
+                    GeneralConstId::ConstId(id) => match &ConstSignature::of(f.db, id).name {
+                        Some(name) => {
+                            f.start_location_link(id.into());
+                            write!(f, "{}", name.display(f.db, f.edition()))?;
+                            f.end_location_link();
+                        }
+                        None => f.write_str("_")?,
+                    },
+                    GeneralConstId::StaticId(id) => {
+                        let name = &StaticSignature::of(f.db, id).name;
+                        f.start_location_link(id.into());
+                        write!(f, "{}", name.display(f.db, f.edition()))?;
+                        f.end_location_link();
+                    }
+                    GeneralConstId::AnonConstId(_) => {
+                        f.write_str(if f.display_kind.is_source_code() { "_" } else { "{const}" })?
+                    }
+                };
                 hir_fmt_generics(f, unev.args.as_slice(), c.generic_def(f.db), None)?;
                 Ok(())
             }
@@ -765,7 +780,7 @@ fn render_const_scalar<'db>(
     memory_map: &MemoryMap<'db>,
     ty: Ty<'db>,
 ) -> Result {
-    let param_env = ParamEnv::empty();
+    let param_env = ParamEnv::empty(f.interner);
     let infcx = f.interner.infer_ctxt().build(TypingMode::PostAnalysis);
     let ty = infcx.at(&ObligationCause::dummy(), param_env).deeply_normalize(ty).unwrap_or(ty);
     render_const_scalar_inner(f, b, memory_map, ty, param_env)
@@ -975,13 +990,7 @@ fn render_const_scalar_inner<'db>(
                         return f.write_str("<failed-to-detect-variant>");
                     };
                     let loc = var_id.lookup(f.db);
-                    write!(
-                        f,
-                        "{}",
-                        loc.parent.enum_variants(f.db).variants[loc.index as usize]
-                            .1
-                            .display(f.db, f.edition())
-                    )?;
+                    write!(f, "{}", loc.name.display(f.db, f.edition()))?;
                     let field_types = f.db.field_types(var_id.into());
                     render_variant_after_name(
                         var_id.fields(f.db),
@@ -1050,7 +1059,7 @@ fn render_const_scalar_from_valtree<'db>(
     ty: Ty<'db>,
     valtree: ValTree<'db>,
 ) -> Result {
-    let param_env = ParamEnv::empty();
+    let param_env = ParamEnv::empty(f.interner);
     let infcx = f.interner.infer_ctxt().build(TypingMode::PostAnalysis);
     let ty = infcx.at(&ObligationCause::dummy(), param_env).deeply_normalize(ty).unwrap_or(ty);
     render_const_scalar_from_valtree_inner(f, ty, valtree, param_env)
@@ -1205,7 +1214,7 @@ fn render_variant_after_name<'db>(
         FieldsShape::Record | FieldsShape::Tuple => {
             let render_field = |f: &mut HirFormatter<'_, 'db>, id: LocalFieldId| {
                 let offset = layout.fields.offset(u32::from(id.into_raw()) as usize).bytes_usize();
-                let ty = field_types[id].get().instantiate(f.interner, args);
+                let ty = field_types[id].get().instantiate(f.interner, args).skip_norm_wip();
                 let Ok(layout) = f.db.layout_of_ty(ty.store(), param_env.store()) else {
                     return f.write_str("<layout-error>");
                 };
@@ -1316,7 +1325,8 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
             }
             TyKind::FnDef(def, args) => {
                 let def = def.0;
-                let sig = db.callable_item_signature(def).instantiate(interner, args);
+                let sig =
+                    db.callable_item_signature(def).instantiate(interner, args).skip_norm_wip();
 
                 if f.display_kind.is_source_code() {
                     // `FnDef` is anonymous and there's no surface syntax for it. Show it as a
@@ -1326,7 +1336,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 if let Safety::Unsafe = sig.safety() {
                     write!(f, "unsafe ")?;
                 }
-                if !matches!(sig.abi(), FnAbi::Rust | FnAbi::RustCall) {
+                if !sig.abi().is_rustic_abi() {
                     f.write_str("extern \"")?;
                     f.write_str(sig.abi().as_str())?;
                     f.write_str("\" ")?;
@@ -1346,13 +1356,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                     }
                     CallableDefId::EnumVariantId(e) => {
                         let loc = e.lookup(db);
-                        write!(
-                            f,
-                            "{}",
-                            loc.parent.enum_variants(db).variants[loc.index as usize]
-                                .1
-                                .display(db, f.edition())
-                        )?
+                        write!(f, "{}", loc.name.display(db, f.edition()))?
                     }
                 };
                 f.end_location_link();
@@ -1462,8 +1466,8 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
 
                 hir_fmt_generics(f, parameters.as_slice(), Some(def.def_id().into()), None)?;
             }
-            TyKind::Alias(alias_ty @ AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => {
-                write_projection(f, &alias_ty, trait_bounds_need_parens)?
+            TyKind::Alias(alias_ty @ AliasTy { kind: AliasTyKind::Projection { def_id }, .. }) => {
+                write_projection(f, &alias_ty, trait_bounds_need_parens, def_id.0)?
             }
             TyKind::Foreign(alias) => {
                 let type_alias = TypeAliasSignature::of(db, alias.0);
@@ -1472,19 +1476,17 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                 f.end_location_link();
             }
             TyKind::Alias(alias_ty @ AliasTy { kind: AliasTyKind::Opaque { def_id }, .. }) => {
-                let opaque_ty_id = match def_id {
-                    SolverDefId::InternedOpaqueTyId(id) => id,
-                    _ => unreachable!(),
-                };
+                let opaque_ty_id = def_id.0;
                 if !f.display_kind.allows_opaque() {
                     return Err(HirDisplayError::DisplaySourceCodeError(
                         DisplaySourceCodeError::OpaqueType,
                     ));
                 }
-                let impl_trait_id = db.lookup_intern_impl_trait_id(opaque_ty_id);
+                let impl_trait_id = opaque_ty_id.loc(db);
                 let data = impl_trait_id.predicates(db);
                 let bounds = data
                     .iter_instantiated_copied(interner, alias_ty.args.as_slice())
+                    .map(Unnormalized::skip_norm_wip)
                     .collect::<Vec<_>>();
                 let krate = match impl_trait_id {
                     ImplTraitId::ReturnTypeImplTrait(func, _) => {
@@ -1652,6 +1654,7 @@ impl<'db> HirDisplay<'db> for Ty<'db> {
                         TypeParamProvenance::ArgumentImplTrait => {
                             let bounds = GenericPredicates::query_all(f.db, param.id.parent())
                                 .iter_identity()
+                                .map(Unnormalized::skip_norm_wip)
                                 .filter(|wc| match wc.kind().skip_binder() {
                                     ClauseKind::Trait(tr) => tr.self_ty() == *self,
                                     ClauseKind::Projection(proj) => proj.self_ty() == *self,
@@ -1860,7 +1863,9 @@ fn generic_args_sans_defaults<'ga, 'db>(
                 let should_show = |arg: GenericArg<'db>, i: usize| match default_parameters.get(i) {
                     None => true,
                     Some(default_parameter) => {
-                        arg != default_parameter.instantiate(f.interner, &parameters[..i])
+                        arg != default_parameter
+                            .instantiate(f.interner, &parameters[..i])
+                            .skip_norm_wip()
                     }
                 };
                 let mut default_from = 0;
@@ -1943,8 +1948,8 @@ fn hir_fmt_tys<'db>(
 
 impl<'db> HirDisplay<'db> for PolyFnSig<'db> {
     fn hir_fmt(&self, f: &mut HirFormatter<'_, 'db>) -> Result {
-        let FnSig { inputs_and_output, c_variadic, safety, abi: _ } = self.skip_binder();
-        if let Safety::Unsafe = safety {
+        let FnSig { inputs_and_output, fn_sig_kind } = self.skip_binder();
+        if let Safety::Unsafe = fn_sig_kind.safety() {
             write!(f, "unsafe ")?;
         }
         // FIXME: Enable this when the FIXME on FnAbi regarding PartialEq is fixed.
@@ -1955,7 +1960,7 @@ impl<'db> HirDisplay<'db> for PolyFnSig<'db> {
         // }
         write!(f, "fn(")?;
         f.write_joined(inputs_and_output.inputs(), ", ")?;
-        if c_variadic {
+        if fn_sig_kind.c_variadic() {
             if inputs_and_output.inputs().is_empty() {
                 write!(f, "...")?;
             } else {
@@ -2158,6 +2163,9 @@ fn write_bounds_like_dyn_trait<'db>(
                 }
             }
             ClauseKind::Projection(projection) => {
+                let TermId::TypeAliasId(assoc_ty_id) = projection.def_id().0 else {
+                    continue;
+                };
                 // in types in actual Rust, these will always come
                 // after the corresponding Implemented predicate
                 if angle_open {
@@ -2166,7 +2174,6 @@ fn write_bounds_like_dyn_trait<'db>(
                     write!(f, "<")?;
                     angle_open = true;
                 }
-                let assoc_ty_id = projection.def_id().expect_type_alias();
                 let type_alias = TypeAliasSignature::of(f.db, assoc_ty_id);
                 f.start_location_link(assoc_ty_id.into());
                 write!(f, "{}", type_alias.name.display(f.db, f.edition()))?;
@@ -2472,9 +2479,9 @@ impl<'db> HirDisplayWithExpressionStore<'db> for TypeRefId {
                 if fn_.is_unsafe {
                     write!(f, "unsafe ")?;
                 }
-                if let Some(abi) = &fn_.abi {
+                if fn_.abi != ExternAbi::Rust {
                     f.write_str("extern \"")?;
-                    f.write_str(abi.as_str())?;
+                    f.write_str(fn_.abi.as_str())?;
                     f.write_str("\" ")?;
                 }
                 write!(f, "fn(")?;

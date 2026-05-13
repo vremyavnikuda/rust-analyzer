@@ -93,7 +93,7 @@ pub(crate) fn complete_dot(
         // Does <&receiver_ty as IntoIterator>::IntoIter` exist? Assume `iter` is valid
         let iter = receiver_ty
             .autoderef(ctx.db)
-            .map(|ty| ty.strip_references().add_reference(hir::Mutability::Shared))
+            .map(|ty| ty.strip_references().add_reference(ctx.db, hir::Mutability::Shared))
             .find_map(|ty| ty.into_iterator_iter(ctx.db))
             .map(|ty| (ty, SmolStr::new_static("iter()")));
         // Does <receiver_ty as IntoIterator>::IntoIter` exist?
@@ -1093,7 +1093,7 @@ impl Foo { fn foo(&mut self) { let _: fn(&mut Self) = |this| { $0 } } }"#,
                 me this.foo() fn(&mut self)
                 lc self            &mut Foo
                 lc this            &mut Foo
-                md core
+                md core::
                 sp Self                 Foo
                 st Foo                  Foo
                 tt Fn
@@ -1117,7 +1117,7 @@ impl Foo { fn foo(&self) { let _: fn(&Self) = |foo| { $0 } } }"#,
                 me self.foo() fn(&self)
                 lc foo             &Foo
                 lc self            &Foo
-                md core
+                md core::
                 sp Self             Foo
                 st Foo              Foo
                 tt Fn
@@ -1137,7 +1137,7 @@ impl Foo { fn foo(&self) { let _: fn(&Self) = || { $0 } } }"#,
                 fd self.field       i32
                 me self.foo() fn(&self)
                 lc self            &Foo
-                md core
+                md core::
                 sp Self             Foo
                 st Foo              Foo
                 tt Fn
@@ -1159,7 +1159,7 @@ impl Foo { fn foo(&self) { let _: fn(&Self, &Self) = |foo, other| { $0 } } }"#,
                 lc foo             &Foo
                 lc other           &Foo
                 lc self            &Foo
-                md core
+                md core::
                 sp Self             Foo
                 st Foo              Foo
                 tt Fn

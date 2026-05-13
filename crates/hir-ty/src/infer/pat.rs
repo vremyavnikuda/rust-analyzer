@@ -517,6 +517,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                 self.infer_tuple_pat(pat, elements, ddpos, expected, pat_info)
             }
             Pat::Box { inner } => self.infer_box_pat(pat, inner, expected, pat_info),
+            Pat::Deref { inner } => self.infer_deref_pat(pat, inner, expected, pat_info),
             // Pat::Deref(inner) => self.infer_deref_pat(pat.span, inner, expected, pat_info),
             Pat::Ref { pat: inner, mutability: mutbl } => self.infer_ref_pat(
                 pat,
@@ -616,7 +617,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
             // When checking an explicit deref pattern, only peel reference types.
             // FIXME(deref_patterns): If box patterns and deref patterns need to coexist, box
             // patterns may want `PeelKind::Implicit`, stopping on encountering a box.
-            Pat::Box { .. } /*  | Pat::Deref(_) */ => {
+            Pat::Box { .. } | Pat::Deref { .. } => {
                 AdjustMode::Peel { kind: PeelKind::ExplicitDerefPat }
             }
             // A never pattern behaves somewhat like a literal or unit variant.
@@ -842,7 +843,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
         if let (Some((true, ..)), _) | (_, Some((true, ..))) = (lhs, rhs) {
             // There exists a side that didn't meet our criteria that the end-point
             // be of a numeric or char type, as checked in `calc_side` above.
-            // FIXME: Emit an error.
+            self.push_diagnostic(InferenceDiagnostic::InvalidRangePatType { pat });
             return self.types.types.error;
         }
 
@@ -1069,7 +1070,8 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
         {
             for (i, &subpat) in subpats.iter().enumerate_and_adjust(variant_fields.len(), ddpos) {
                 let field_id = LocalFieldId::from_raw(la_arena::RawIdx::from_u32(i as u32));
-                let field_ty = variant_field_tys[field_id].get().instantiate(interner, args);
+                let field_ty =
+                    variant_field_tys[field_id].get().instantiate(interner, args).skip_norm_wip();
                 self.infer_pat(subpat, field_ty, pat_info);
             }
             if let Err(()) = had_err {
@@ -1088,7 +1090,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
             for (i, &pat) in subpats.iter().enumerate() {
                 let field_id = LocalFieldId::from_raw(la_arena::RawIdx::from_u32(i as u32));
                 let expected = match variant_field_tys.get(field_id) {
-                    Some(field_ty) => field_ty.get().instantiate(interner, args),
+                    Some(field_ty) => field_ty.get().instantiate(interner, args).skip_norm_wip(),
                     None => self.types.types.error,
                 };
                 self.infer_pat(pat, expected, pat_info);
@@ -1183,7 +1185,10 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
         for (field_idx, field) in fields.iter().enumerate() {
             match used_fields.entry(field.name.clone()) {
                 Occupied(_occupied) => {
-                    // FIXME: Emit an error, field specified twice.
+                    self.push_diagnostic(InferenceDiagnostic::DuplicateField {
+                        field: field.pat.into(),
+                        variant,
+                    });
                 }
                 Vacant(vacant) => {
                     vacant.insert(field_idx);
@@ -1200,7 +1205,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
                         });
                     }
 
-                    variant_field_tys[field_idx].get().instantiate(interner, args)
+                    variant_field_tys[field_idx].get().instantiate(interner, args).skip_norm_wip()
                 }
                 None => {
                     inexistent_fields.push(field);
@@ -1270,7 +1275,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
         box_ty
     }
 
-    fn _infer_deref_pat(
+    fn infer_deref_pat(
         &mut self,
         pat: PatId,
         inner: PatId,
@@ -1332,7 +1337,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
     /// This is computed from the typeck results since we want to make
     /// sure to apply any match-ergonomics adjustments, which we cannot
     /// determine from the HIR alone.
-    fn pat_has_ref_mut_binding(&self, pat: PatId) -> bool {
+    pub(super) fn pat_has_ref_mut_binding(&self, pat: PatId) -> bool {
         let mut has_ref_mut = false;
         self.store.walk_pats(pat, &mut |pat| {
             if let Some(BindingMode(ByRef::Yes(Mutability::Mut), _)) =
@@ -1615,7 +1620,10 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
             TyKind::Slice(element_ty) => (element_ty, Some(expected), expected),
             // The expected type must be an array or slice, but was neither, so error.
             _ => {
-                // FIXME: Emit an error: expected an array or a slice.
+                self.push_diagnostic(InferenceDiagnostic::ExpectedArrayOrSlicePat {
+                    pat,
+                    found: expected.store(),
+                });
                 let err = self.types.types.error;
                 (err, Some(err), err)
             }

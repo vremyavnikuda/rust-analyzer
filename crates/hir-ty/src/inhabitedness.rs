@@ -125,7 +125,7 @@ impl<'a, 'db> UninhabitedFrom<'a, 'db> {
             AdtId::EnumId(e) => {
                 let enum_data = e.enum_variants(self.db());
 
-                for &(variant, _, _) in enum_data.variants.iter() {
+                for &(variant, _) in enum_data.variants.values() {
                     let variant_inhabitedness = self.visit_variant(variant.into(), subst);
                     match variant_inhabitedness {
                         Break(VisiblyUninhabited) => (),
@@ -169,7 +169,7 @@ impl<'a, 'db> UninhabitedFrom<'a, 'db> {
         subst: GenericArgs<'db>,
     ) -> ControlFlow<VisiblyUninhabited> {
         if vis.is_none_or(|it| it.is_visible_from(self.db(), self.target_mod)) {
-            let ty = ty.instantiate(self.interner(), subst);
+            let ty = ty.instantiate(self.interner(), subst).skip_norm_wip();
             ty.visit_with(self)
         } else {
             CONTINUE_OPAQUELY_INHABITED

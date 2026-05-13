@@ -34,7 +34,9 @@ mod handlers {
     pub(crate) mod break_outside_of_loop;
     pub(crate) mod duplicate_field;
     pub(crate) mod elided_lifetimes_in_path;
+    pub(crate) mod expected_array_or_slice_pat;
     pub(crate) mod expected_function;
+    pub(crate) mod functional_record_update_on_non_struct;
     pub(crate) mod generic_args_prohibited;
     pub(crate) mod generic_default_refers_to_self;
     pub(crate) mod inactive_code;
@@ -45,6 +47,7 @@ mod handlers {
     pub(crate) mod invalid_cast;
     pub(crate) mod invalid_derive_target;
     pub(crate) mod invalid_lhs_of_assignment;
+    pub(crate) mod invalid_range_pat_type;
     pub(crate) mod macro_error;
     pub(crate) mod malformed_derive;
     pub(crate) mod mismatched_arg_count;
@@ -101,7 +104,8 @@ mod tests;
 use std::sync::LazyLock;
 
 use hir::{
-    Crate, DisplayTarget, InFile, Semantics, db::ExpandDatabase, diagnostics::AnyDiagnostic,
+    Crate, DisplayTarget, InFile, MacroCallIdExt, Semantics, db::ExpandDatabase,
+    diagnostics::AnyDiagnostic,
 };
 use ide_db::{
     FileId, FileRange, FxHashMap, FxHashSet, RootDatabase, Severity, SnippetCap,
@@ -227,6 +231,25 @@ impl Diagnostic {
     fn with_unused(mut self, unused: bool) -> Diagnostic {
         self.unused = unused;
         self
+    }
+
+    fn main_node(&self, sema: &Semantics<'_, RootDatabase>) -> Option<InFile<SyntaxNode>> {
+        self.main_node.map(|ptr| ptr.with_value(sema.to_node_syntax(ptr))).or_else(|| {
+            let token = sema
+                .parse_guess_edition(self.range.file_id)
+                .syntax()
+                .token_at_offset(self.range.range.start())
+                .right_biased()?;
+            sema.descend_into_macros(token).into_iter().find_map(|token| {
+                let node = sema.ancestors_with_macros(token.parent().unwrap()).find(|node| {
+                    let original_range = sema.original_range(node);
+                    original_range.file_id.file_id(sema.db) == self.range.file_id
+                        && original_range.range.contains_range(self.range.range)
+                })?;
+                let file = sema.hir_file_for(&node);
+                Some(InFile::new(file, node))
+            })
+        })
     }
 }
 
@@ -405,7 +428,9 @@ pub fn semantic_diagnostics(
         let d = match diag {
             AnyDiagnostic::AwaitOutsideOfAsync(d) => handlers::await_outside_of_async::await_outside_of_async(&ctx, &d),
             AnyDiagnostic::CastToUnsized(d) => handlers::invalid_cast::cast_to_unsized(&ctx, &d),
+            AnyDiagnostic::ExpectedArrayOrSlicePat(d) => handlers::expected_array_or_slice_pat::expected_array_or_slice_pat(&ctx, &d),
             AnyDiagnostic::ExpectedFunction(d) => handlers::expected_function::expected_function(&ctx, &d),
+            AnyDiagnostic::FunctionalRecordUpdateOnNonStruct(d) => handlers::functional_record_update_on_non_struct::functional_record_update_on_non_struct(&ctx, &d),
             AnyDiagnostic::InactiveCode(d) => match handlers::inactive_code::inactive_code(&ctx, &d) {
                 Some(it) => it,
                 None => continue,
@@ -495,6 +520,7 @@ pub fn semantic_diagnostics(
             AnyDiagnostic::ElidedLifetimesInPath(d) => handlers::elided_lifetimes_in_path::elided_lifetimes_in_path(&ctx, &d),
             AnyDiagnostic::GenericDefaultRefersToSelf(d) => handlers::generic_default_refers_to_self::generic_default_refers_to_self(&ctx, &d),
             AnyDiagnostic::InvalidLhsOfAssignment(d) => handlers::invalid_lhs_of_assignment::invalid_lhs_of_assignment(&ctx, &d),
+            AnyDiagnostic::InvalidRangePatType(d) => handlers::invalid_range_pat_type::invalid_range_pat_type(&ctx, &d),
             AnyDiagnostic::TypeMustBeKnown(d) => handlers::type_must_be_known::type_must_be_known(&ctx, &d),
             AnyDiagnostic::PatternArgInExternFn(d) => handlers::pattern_arg_in_extern_fn::pattern_arg_in_extern_fn(&ctx, &d),
             AnyDiagnostic::UnionExprMustHaveExactlyOneField(d) => handlers::union_expr_must_have_exactly_one_field::union_expr_must_have_exactly_one_field(&ctx, &d),
@@ -511,14 +537,7 @@ pub fn semantic_diagnostics(
     let mut lints = res
         .iter_mut()
         .filter(|it| matches!(it.code, DiagnosticCode::Clippy(_) | DiagnosticCode::RustcLint(_)))
-        .filter_map(|it| {
-            Some((
-                it.main_node.map(|ptr| {
-                    ptr.map(|node| node.to_node(&ctx.sema.parse_or_expand(ptr.file_id)))
-                })?,
-                it,
-            ))
-        })
+        .filter_map(|it| Some((it.main_node(&ctx.sema)?, it)))
         .collect::<Vec<_>>();
 
     // The edition isn't accurate (each diagnostics may have its own edition due to macros),
@@ -565,7 +584,7 @@ fn handle_diag_from_macros(
     let mut spans = span_map.spans_for_range(node.text_range());
     if spans.any(|span| {
         span.ctx.outer_expn(sema.db).is_some_and(|expansion| {
-            let macro_call = sema.db.lookup_intern_macro_call(expansion.into());
+            let macro_call = expansion.loc(sema.db);
             // We don't want to show diagnostics for non-local macros at all, but proc macros authors
             // seem to rely on being able to emit non-warning-free code, so we don't want to show warnings
             // for them even when the proc macro comes from the same workspace (in rustc that's not a

@@ -50,7 +50,7 @@ impl TraitItems {
         db: &dyn DefDatabase,
         tr: TraitId,
     ) -> (TraitItems, DefDiagnostics) {
-        let ItemLoc { container: module_id, id: ast_id } = tr.lookup(db);
+        let ItemLoc { container: module_id, id: ast_id } = *tr.lookup(db);
         let ast_id_map = db.ast_id_map(ast_id.file_id);
         let source = ast_id.with_value(ast_id_map.get(ast_id.value)).to_node(db);
         if source.eq_token().is_some() {
@@ -115,7 +115,7 @@ impl ImplItems {
     #[salsa::tracked(returns(ref))]
     pub fn of(db: &dyn DefDatabase, id: ImplId) -> (ImplItems, DefDiagnostics) {
         let _p = tracing::info_span!("impl_items_with_diagnostics_query").entered();
-        let ItemLoc { container: module_id, id: ast_id } = id.lookup(db);
+        let ItemLoc { container: module_id, id: ast_id } = *id.lookup(db);
 
         let collector =
             AssocItemCollector::new(db, module_id, ItemContainerId::ImplId(id), ast_id.file_id);
@@ -217,7 +217,7 @@ impl<'db> AssocItemCollector<'db> {
                 attr_id,
             ) {
                 Ok(ResolvedAttr::Macro(call_id)) => {
-                    let loc = self.db.lookup_intern_macro_call(call_id);
+                    let loc = call_id.loc(self.db);
                     if let MacroDefKind::ProcMacro(_, exp, _) = loc.def.kind {
                         // If there's no expander for the proc macro (e.g. the
                         // proc macro is ignored, or building the proc macro

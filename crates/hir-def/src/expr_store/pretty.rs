@@ -8,6 +8,7 @@ use std::{
 
 use hir_expand::{Lookup, mod_path::PathKind};
 use itertools::Itertools;
+use rustc_abi::ExternAbi;
 use span::Edition;
 use stdx::never;
 use syntax::ast::{HasName, RangeOp};
@@ -91,7 +92,7 @@ pub fn print_body_hir(
     };
     if let DefWithBodyId::FunctionId(_) = owner {
         p.buf.push('(');
-        if let Some(self_param) = body.self_param {
+        if let Some(self_param) = body.self_param() {
             p.print_binding(self_param);
             p.buf.push_str(", ");
         }
@@ -292,7 +293,7 @@ pub fn print_function(
     if flags.contains(FnFlags::EXPLICIT_SAFE) {
         w!(p, "safe ");
     }
-    if let Some(abi) = abi {
+    if *abi != ExternAbi::Rust {
         w!(p, "extern \"{}\" ", abi.as_str());
     }
     w!(p, "fn ");
@@ -1031,6 +1032,11 @@ impl Printer<'_> {
                 w!(self, "box ");
                 self.print_pat(*inner);
             }
+            Pat::Deref { inner } => {
+                w!(self, "deref!(");
+                self.print_pat(*inner);
+                w!(self, ")");
+            }
             Pat::ConstBlock(c) => {
                 w!(self, "const ");
                 self.print_expr(*c);
@@ -1310,9 +1316,9 @@ impl Printer<'_> {
                 if fn_.is_unsafe {
                     w!(self, "unsafe ");
                 }
-                if let Some(abi) = &fn_.abi {
+                if fn_.abi != ExternAbi::Rust {
                     w!(self, "extern ");
-                    w!(self, "{}", abi.as_str());
+                    w!(self, "{}", fn_.abi.as_str());
                     w!(self, " ");
                 }
                 w!(self, "fn(");
