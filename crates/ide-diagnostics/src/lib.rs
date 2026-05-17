@@ -32,10 +32,12 @@ mod handlers {
     pub(crate) mod await_outside_of_async;
     pub(crate) mod bad_rtn;
     pub(crate) mod break_outside_of_loop;
+    pub(crate) mod cannot_be_dereferenced;
     pub(crate) mod duplicate_field;
     pub(crate) mod elided_lifetimes_in_path;
     pub(crate) mod expected_array_or_slice_pat;
     pub(crate) mod expected_function;
+    pub(crate) mod fru_in_destructuring_assignment;
     pub(crate) mod functional_record_update_on_non_struct;
     pub(crate) mod generic_args_prohibited;
     pub(crate) mod generic_default_refers_to_self;
@@ -50,6 +52,7 @@ mod handlers {
     pub(crate) mod invalid_range_pat_type;
     pub(crate) mod macro_error;
     pub(crate) mod malformed_derive;
+    pub(crate) mod method_call_illegal_sized_bound;
     pub(crate) mod mismatched_arg_count;
     pub(crate) mod mismatched_array_pat_len;
     pub(crate) mod missing_fields;
@@ -61,6 +64,7 @@ mod handlers {
     pub(crate) mod no_such_field;
     pub(crate) mod non_exhaustive_let;
     pub(crate) mod non_exhaustive_record_expr;
+    pub(crate) mod non_exhaustive_record_pat;
     pub(crate) mod parenthesized_generic_args_without_fn_trait;
     pub(crate) mod pattern_arg_in_extern_fn;
     pub(crate) mod private_assoc_item;
@@ -427,6 +431,7 @@ pub fn semantic_diagnostics(
     for diag in diags {
         let d = match diag {
             AnyDiagnostic::AwaitOutsideOfAsync(d) => handlers::await_outside_of_async::await_outside_of_async(&ctx, &d),
+            AnyDiagnostic::CannotBeDereferenced(d) => handlers::cannot_be_dereferenced::cannot_be_dereferenced(&ctx, &d),
             AnyDiagnostic::CastToUnsized(d) => handlers::invalid_cast::cast_to_unsized(&ctx, &d),
             AnyDiagnostic::ExpectedArrayOrSlicePat(d) => handlers::expected_array_or_slice_pat::expected_array_or_slice_pat(&ctx, &d),
             AnyDiagnostic::ExpectedFunction(d) => handlers::expected_function::expected_function(&ctx, &d),
@@ -453,6 +458,7 @@ pub fn semantic_diagnostics(
                 continue;
             },
             AnyDiagnostic::MalformedDerive(d) => handlers::malformed_derive::malformed_derive(&ctx, &d),
+            AnyDiagnostic::MethodCallIllegalSizedBound(d) => handlers::method_call_illegal_sized_bound::method_call_illegal_sized_bound(&ctx, &d),
             AnyDiagnostic::MismatchedArgCount(d) => handlers::mismatched_arg_count::mismatched_arg_count(&ctx, &d),
             AnyDiagnostic::MismatchedArrayPatLen(d) => handlers::mismatched_array_pat_len::mismatched_array_pat_len(&ctx, &d),
             AnyDiagnostic::MissingFields(d) => handlers::missing_fields::missing_fields(&ctx, &d),
@@ -466,6 +472,9 @@ pub fn semantic_diagnostics(
             AnyDiagnostic::NonExhaustiveLet(d) => handlers::non_exhaustive_let::non_exhaustive_let(&ctx, &d),
             AnyDiagnostic::NonExhaustiveRecordExpr(d) => {
                 handlers::non_exhaustive_record_expr::non_exhaustive_record_expr(&ctx, &d)
+            }
+            AnyDiagnostic::NonExhaustiveRecordPat(d) => {
+                handlers::non_exhaustive_record_pat::non_exhaustive_record_pat(&ctx, &d)
             }
             AnyDiagnostic::NoSuchField(d) => handlers::no_such_field::no_such_field(&ctx, &d),
             AnyDiagnostic::DuplicateField(d) => handlers::duplicate_field::duplicate_field(&ctx, &d),
@@ -525,6 +534,7 @@ pub fn semantic_diagnostics(
             AnyDiagnostic::PatternArgInExternFn(d) => handlers::pattern_arg_in_extern_fn::pattern_arg_in_extern_fn(&ctx, &d),
             AnyDiagnostic::UnionExprMustHaveExactlyOneField(d) => handlers::union_expr_must_have_exactly_one_field::union_expr_must_have_exactly_one_field(&ctx, &d),
             AnyDiagnostic::UnimplementedTrait(d) => handlers::unimplemented_trait::unimplemented_trait(&ctx, &d),
+            AnyDiagnostic::FruInDestructuringAssignment(d) => handlers::fru_in_destructuring_assignment::fru_in_destructuring_assignment(&ctx, &d),
         };
         res.push(d)
     }

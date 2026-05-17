@@ -906,6 +906,7 @@ impl Printer<'_> {
             Pat::Missing => w!(self, "�"),
             Pat::Rest => w!(self, ".."),
             Pat::Wild => w!(self, "_"),
+            Pat::NotNull => w!(self, "!null"),
             Pat::Tuple { args, ellipsis } => {
                 w!(self, "(");
                 for (i, pat) in args.iter().enumerate() {
@@ -1134,6 +1135,7 @@ impl Printer<'_> {
                 LangItemTarget::TypeAliasId(it) => write_name!(it),
                 LangItemTarget::TraitId(it) => write_name!(it),
                 LangItemTarget::EnumVariantId(it) => write_name!(it),
+                LangItemTarget::ConstId(it) => write_name!(it),
             }
 
             if let Some(s) = s {
@@ -1345,6 +1347,11 @@ impl Printer<'_> {
             TypeRef::DynTrait(bounds) => {
                 w!(self, "dyn ");
                 self.print_type_bounds(bounds);
+            }
+            TypeRef::PatternType(ty, pat) => {
+                self.print_type_ref(*ty);
+                w!(self, " is ");
+                self.print_pat(*pat);
             }
         }
     }

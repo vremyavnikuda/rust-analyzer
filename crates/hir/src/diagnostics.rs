@@ -102,9 +102,11 @@ macro_rules! diagnostics {
 diagnostics![AnyDiagnostic<'db> ->
     AwaitOutsideOfAsync,
     BreakOutsideOfLoop,
+    CannotBeDereferenced<'db>,
     CastToUnsized<'db>,
     ExpectedArrayOrSlicePat<'db>,
     ExpectedFunction<'db>,
+    FruInDestructuringAssignment,
     FunctionalRecordUpdateOnNonStruct,
     GenericDefaultRefersToSelf,
     InactiveCode,
@@ -120,6 +122,7 @@ diagnostics![AnyDiagnostic<'db> ->
     MacroError,
     MacroExpansionParseError,
     MalformedDerive,
+    MethodCallIllegalSizedBound,
     MismatchedArgCount,
     MismatchedTupleStructPatArgCount,
     MissingFields,
@@ -129,6 +132,7 @@ diagnostics![AnyDiagnostic<'db> ->
     NeedMut,
     NonExhaustiveLet,
     NonExhaustiveRecordExpr,
+    NonExhaustiveRecordPat,
     NoSuchField,
     MismatchedArrayPatLen,
     DuplicateField,
@@ -316,6 +320,17 @@ pub struct ExpectedFunction<'db> {
 }
 
 #[derive(Debug)]
+pub struct CannotBeDereferenced<'db> {
+    pub expr: InFile<ExprOrPatPtr>,
+    pub found: Type<'db>,
+}
+
+#[derive(Debug)]
+pub struct FruInDestructuringAssignment {
+    pub node: InFile<AstPtr<ast::Expr>>,
+}
+
+#[derive(Debug)]
 pub struct FunctionalRecordUpdateOnNonStruct {
     pub base_expr: InFile<ExprOrPatPtr>,
 }
@@ -404,6 +419,12 @@ pub struct NonExhaustiveLet {
 #[derive(Debug)]
 pub struct NonExhaustiveRecordExpr {
     pub expr: InFile<ExprOrPatPtr>,
+}
+
+#[derive(Debug)]
+pub struct NonExhaustiveRecordPat {
+    pub pat: InFile<ExprOrPatPtr>,
+    pub variant: Variant,
 }
 
 #[derive(Debug)]
@@ -586,6 +607,11 @@ pub struct UnionExprMustHaveExactlyOneField {
 #[derive(Debug)]
 pub struct InvalidLhsOfAssignment {
     pub lhs: InFile<AstPtr<Either<ast::Expr, ast::Pat>>>,
+}
+
+#[derive(Debug)]
+pub struct MethodCallIllegalSizedBound {
+    pub call_expr: InFile<ExprOrPatPtr>,
 }
 
 #[derive(Debug)]
@@ -882,6 +908,10 @@ impl<'db> AnyDiagnostic<'db> {
             &InferenceDiagnostic::NonExhaustiveRecordExpr { expr } => {
                 NonExhaustiveRecordExpr { expr: expr_syntax(expr)? }.into()
             }
+            &InferenceDiagnostic::NonExhaustiveRecordPat { pat, variant } => {
+                let pat = pat_syntax(pat)?.map(Into::into);
+                NonExhaustiveRecordPat { pat, variant: variant.into() }.into()
+            }
             &InferenceDiagnostic::FunctionalRecordUpdateOnNonStruct { base_expr } => {
                 FunctionalRecordUpdateOnNonStruct { base_expr: expr_syntax(base_expr)? }.into()
             }
@@ -905,6 +935,10 @@ impl<'db> AnyDiagnostic<'db> {
                 let expr_ty = Type::new(db, def, expr_ty.as_ref());
                 let cast_ty = Type::new(db, def, cast_ty.as_ref());
                 InvalidCast { expr, error: *error, expr_ty, cast_ty }.into()
+            }
+            InferenceDiagnostic::CannotBeDereferenced { expr, found } => {
+                let expr = expr_syntax(*expr)?;
+                CannotBeDereferenced { expr, found: Type::new(db, def, found.as_ref()) }.into()
             }
             InferenceDiagnostic::TyDiagnostic { source, diag } => {
                 let source_map = match source {
@@ -972,6 +1006,9 @@ impl<'db> AnyDiagnostic<'db> {
             &InferenceDiagnostic::InvalidLhsOfAssignment { lhs } => {
                 let lhs = expr_syntax(lhs)?;
                 InvalidLhsOfAssignment { lhs }.into()
+            }
+            &InferenceDiagnostic::MethodCallIllegalSizedBound { call_expr } => {
+                MethodCallIllegalSizedBound { call_expr: expr_syntax(call_expr)? }.into()
             }
             &InferenceDiagnostic::TypeMustBeKnown { at_point, ref top_term } => {
                 let at_point = span_syntax(at_point)?;

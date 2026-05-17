@@ -448,7 +448,7 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
                 )
             }
             Pat::Missing => self.types.types.error,
-            Pat::Wild | Pat::Rest => expected,
+            Pat::Wild | Pat::Rest | Pat::NotNull => expected,
             // We allow any type here; we ensure that the type is uninhabited during match checking.
             // Pat::Never => expected,
             Pat::Path(_) => {
@@ -662,6 +662,8 @@ impl<'a, 'db> InferenceContext<'a, 'db> {
             Pat::Ref { .. }
             // No need to do anything on a missing pattern.
             | Pat::Missing
+            // No need to do anything on a `NotNull` pattern, they are only allowed in type contexts.
+            | Pat::NotNull
             // A `_`/`..` pattern works with any expected type, so there's no need to do anything.
             | Pat::Wild | Pat::Rest
             // Bindings also work with whatever the expected type is,
@@ -1155,7 +1157,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
     fn check_record_pat_fields(
         &mut self,
         adt_ty: Ty<'db>,
-        _pat: PatId,
+        pat: PatId,
         variant: VariantId,
         fields: &[RecordFieldPat],
         has_rest_pat: bool,
@@ -1233,7 +1235,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects";
         // Require `..` if struct has non_exhaustive attribute.
         let non_exhaustive = self.has_applicable_non_exhaustive(variant.into());
         if non_exhaustive && !has_rest_pat {
-            // FIXME: Emit an error.
+            self.push_diagnostic(InferenceDiagnostic::NonExhaustiveRecordPat { pat, variant });
         }
 
         // Report an error if an incorrect number of fields was specified.

@@ -365,6 +365,12 @@ pub enum InferenceDiagnostic {
         #[type_visitable(ignore)]
         expr: ExprId,
     },
+    NonExhaustiveRecordPat {
+        #[type_visitable(ignore)]
+        pat: PatId,
+        #[type_visitable(ignore)]
+        variant: VariantId,
+    },
     FunctionalRecordUpdateOnNonStruct {
         #[type_visitable(ignore)]
         base_expr: ExprId,
@@ -388,6 +394,11 @@ pub enum InferenceDiagnostic {
     ExpectedFunction {
         #[type_visitable(ignore)]
         call_expr: ExprId,
+        found: StoredTy,
+    },
+    CannotBeDereferenced {
+        #[type_visitable(ignore)]
+        expr: ExprId,
         found: StoredTy,
     },
     TypedHole {
@@ -431,6 +442,10 @@ pub enum InferenceDiagnostic {
         kind: IncorrectGenericsLenKind,
         #[type_visitable(ignore)]
         def: GenericDefId,
+    },
+    MethodCallIllegalSizedBound {
+        #[type_visitable(ignore)]
+        call_expr: ExprId,
     },
     MethodCallIncorrectGenericsOrder {
         #[type_visitable(ignore)]
