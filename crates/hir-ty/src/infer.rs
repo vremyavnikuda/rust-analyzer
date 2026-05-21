@@ -401,6 +401,11 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         found: StoredTy,
     },
+    CannotIndexInto {
+        #[type_visitable(ignore)]
+        expr: ExprId,
+        found: StoredTy,
+    },
     TypedHole {
         #[type_visitable(ignore)]
         expr: ExprId,
@@ -481,6 +486,10 @@ pub enum InferenceDiagnostic {
     ExplicitDropMethodUse {
         #[type_visitable(ignore)]
         kind: ExplicitDropMethodUseKind,
+    },
+    MutableRefBinding {
+        #[type_visitable(ignore)]
+        pat: PatId,
     },
 }
 

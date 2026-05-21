@@ -104,6 +104,7 @@ diagnostics![AnyDiagnostic<'db> ->
     AwaitOutsideOfAsync,
     BreakOutsideOfLoop,
     CannotBeDereferenced<'db>,
+    CannotIndexInto<'db>,
     CastToUnsized<'db>,
     ExpectedArrayOrSlicePat<'db>,
     ExpectedFunction<'db>,
@@ -131,6 +132,7 @@ diagnostics![AnyDiagnostic<'db> ->
     MissingMatchArms,
     MissingUnsafe,
     MovedOutOfRef<'db>,
+    MutableRefBinding,
     NeedMut,
     NonExhaustiveLet,
     NonExhaustiveRecordExpr,
@@ -323,6 +325,12 @@ pub struct ExpectedFunction<'db> {
 
 #[derive(Debug)]
 pub struct CannotBeDereferenced<'db> {
+    pub expr: InFile<ExprOrPatPtr>,
+    pub found: Type<'db>,
+}
+
+#[derive(Debug)]
+pub struct CannotIndexInto<'db> {
     pub expr: InFile<ExprOrPatPtr>,
     pub found: Type<'db>,
 }
@@ -631,6 +639,11 @@ pub struct UnimplementedTrait<'db> {
     pub span: SpanSyntax,
     pub trait_predicate: crate::TraitPredicate<'db>,
     pub root_trait_predicate: Option<crate::TraitPredicate<'db>>,
+}
+
+#[derive(Debug)]
+pub struct MutableRefBinding {
+    pub pat: InFile<ExprOrPatPtr>,
 }
 
 impl<'db> AnyDiagnostic<'db> {
@@ -947,6 +960,10 @@ impl<'db> AnyDiagnostic<'db> {
                 let expr = expr_syntax(*expr)?;
                 CannotBeDereferenced { expr, found: Type::new(db, def, found.as_ref()) }.into()
             }
+            InferenceDiagnostic::CannotIndexInto { expr, found } => {
+                let expr = expr_syntax(*expr)?;
+                CannotIndexInto { expr, found: Type::new(db, def, found.as_ref()) }.into()
+            }
             InferenceDiagnostic::TyDiagnostic { source, diag } => {
                 let source_map = match source {
                     InferenceTyDiagnosticSource::Body => source_map,
@@ -1069,6 +1086,10 @@ impl<'db> AnyDiagnostic<'db> {
                     }
                 };
                 ExplicitDropMethodUse { expr_or_path }.into()
+            }
+            InferenceDiagnostic::MutableRefBinding { pat } => {
+                let pat = pat_syntax(*pat)?.map(Into::into);
+                MutableRefBinding { pat }.into()
             }
         })
     }

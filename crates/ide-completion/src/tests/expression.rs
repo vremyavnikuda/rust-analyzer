@@ -1055,6 +1055,7 @@ fn brr() {
             fn brr()                               fn()
             st YoloVariant                  YoloVariant
             st YoloVariant {…} YoloVariant { f: usize }
+            ev Yolo(…) (use HH::Yolo) Yolo(YoloVariant)
             bt u32                                  u32
             kw const
             kw crate::
@@ -3926,5 +3927,53 @@ fn tryme(param: impl SubTrait) {
             sn pd
             sn ppd
         "#]],
+    );
+}
+
+#[test]
+fn can_complete_macro_path_inside_expansion() {
+    check(
+        r#"
+macro_rules! bar { () => (); }
+macro_rules! foo { ($i:ident) => { $i!() }; }
+fn main() {
+    foo!(ba$0);
+}
+    "#,
+        expect![[r#"
+            fn main()          fn()
+            ma bar macro_rules! bar
+            ma foo macro_rules! foo
+            bt u32              u32
+            kw const
+            kw crate::
+            kw false
+            kw for
+            kw if
+            kw if let
+            kw loop
+            kw match
+            kw return
+            kw self::
+            kw true
+            kw unsafe
+            kw while
+            kw while let
+        "#]],
+    );
+}
+
+#[test]
+fn no_completion_for_autorefd_traits_in_path_mode() {
+    check(
+        r#"
+//- minicore: clone
+trait Test1 {}
+
+fn test<H: Test1>(test: H) {
+    H::$0
+}
+    "#,
+        expect![""],
     );
 }
