@@ -297,6 +297,10 @@ pub enum InferenceDiagnostic {
         #[type_visitable(ignore)]
         has_rest: bool,
     },
+    ArrayPatternWithoutFixedLength {
+        #[type_visitable(ignore)]
+        pat: PatId,
+    },
     ExpectedArrayOrSlicePat {
         #[type_visitable(ignore)]
         pat: PatId,
@@ -399,6 +403,11 @@ pub enum InferenceDiagnostic {
     CannotBeDereferenced {
         #[type_visitable(ignore)]
         expr: ExprId,
+        found: StoredTy,
+    },
+    CannotImplicitlyDerefTraitObject {
+        #[type_visitable(ignore)]
+        pat: PatId,
         found: StoredTy,
     },
     CannotIndexInto {
@@ -1327,7 +1336,7 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
         resolver: Resolver<'db>,
         allow_using_generic_params: bool,
     ) -> Self {
-        let trait_env = db.trait_environment(store_owner);
+        let trait_env = db.trait_environment(generic_def);
         let table = unify::InferenceTable::new(db, trait_env, resolver.krate(), store_owner);
         let types = crate::next_solver::default_types(db);
         InferenceContext {
