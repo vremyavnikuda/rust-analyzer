@@ -690,7 +690,7 @@ fn foo() {
 }
 
 #[test]
-fn foo() {
+fn block_tail_cfg() {
     pretty_print(
         r#"
 macro_rules! foo {
@@ -713,6 +713,51 @@ fn foo() -> i64 {
                 {
                     5
                 }
+            }"#]],
+    );
+}
+
+#[test]
+fn weird_cfgs() {
+    pretty_print(
+        r#"
+macro_rules! falsify {
+    ( $($t:tt)* ) => { #[cfg(false)] $($t)* };
+}
+
+struct Foo();
+
+fn foo() {
+    foo(falsify!(1));
+    (falsify!(1),);
+    [falsify!(1)];
+    Foo(falsify!(1));
+    foo(#[cfg(false)] 1);
+    (#[cfg(false)] 1,);
+    [#[cfg(false)] 1];
+    Foo(#[cfg(false)] 1);
+    (|#[cfg(false)] a| {})();
+
+    builtin # asm(
+        "",
+        #[cfg(false)] x = const 4,
+        #[cfg(false)] options(),
+        #[cfg(false)] clobber_abi("C"),
+    );
+}
+    "#,
+        expect![[r#"
+            fn foo() {
+                foo();
+                ();
+                [];
+                Foo();
+                foo();
+                ();
+                [];
+                Foo();
+                (|| {})();
+                builtin#asm(_);
             }"#]],
     );
 }
