@@ -447,7 +447,7 @@ macro_rules! void_2024 {
 }
 
 "#,
-        expect_file![format!("./test_data/highlight_keywords_macros.html")],
+        expect_file!["./test_data/highlight_keywords_macros.html"],
         false,
     );
 }
@@ -1066,6 +1066,8 @@ fn test_injection() {
         r##"
 fn fixture(#[rust_analyzer::rust_fixture] ra_fixture: &str) {}
 
+fn non_fixture(#[rust_analyzer] ra_fixture: &str) {}
+
 fn main() {
     fixture(r#"
 @@- minicore: sized
@@ -1082,6 +1084,8 @@ fn foo() {
     }\$0)
 }"
     );
+
+    non_fixture(r"@@- ");
 }
 "##,
         expect_file!["./test_data/highlight_injection.html"],
@@ -1594,6 +1598,54 @@ async fn get_double_async(num: u32) -> u32 {
 }
         "#,
         expect_file!["./test_data/async_fn_non_mut_param.html"],
+        false,
+    );
+}
+
+#[test]
+fn private_multi_namespace() {
+    check_highlighting(
+        r#"
+//- /bar.rs crate:bar deps:foo
+use foo::foo;
+
+//- /foo.rs crate:foo
+struct foo;
+
+#[macro_export]
+macro_rules! foo {
+    () => {};
+}
+    "#,
+        expect_file!["./test_data/private_multi_namespace.html"],
+        false,
+    );
+}
+
+#[test]
+fn mod_and_macro_name_conflict() {
+    check_highlighting(
+        r#"
+//- /main.rs crate:main deps:foo
+use foo::bar;
+
+fn main() {
+    bar!()
+}
+
+//- /foo.rs crate:foo
+mod bar {
+    fn random() {}
+}
+
+#[macro_export]
+macro_rules! bar {
+    () => {
+        println!("Hello");
+    };
+}
+"#,
+        expect_file!["./test_data/highlight_module_macro_conflict.html"],
         false,
     );
 }

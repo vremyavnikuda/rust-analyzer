@@ -12,7 +12,7 @@ use la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use span::Edition;
-use stdx::format_to;
+use stdx::{format_to, impl_from};
 use syntax::ast;
 use thin_vec::ThinVec;
 
@@ -37,14 +37,7 @@ pub enum ImportOrExternCrate {
     ExternCrate(ExternCrateId),
 }
 
-impl From<ImportOrGlob> for ImportOrExternCrate {
-    fn from(value: ImportOrGlob) -> Self {
-        match value {
-            ImportOrGlob::Glob(it) => ImportOrExternCrate::Glob(it),
-            ImportOrGlob::Import(it) => ImportOrExternCrate::Import(it),
-        }
-    }
-}
+impl_from!(ImportOrGlob { Glob, Import } for ImportOrExternCrate);
 
 impl ImportOrExternCrate {
     pub fn import_or_glob(self) -> Option<ImportOrGlob> {
@@ -101,24 +94,8 @@ pub enum ImportOrDef {
     Def(ModuleDefId),
 }
 
-impl From<ImportOrExternCrate> for ImportOrDef {
-    fn from(value: ImportOrExternCrate) -> Self {
-        match value {
-            ImportOrExternCrate::Import(it) => ImportOrDef::Import(it),
-            ImportOrExternCrate::Glob(it) => ImportOrDef::Glob(it),
-            ImportOrExternCrate::ExternCrate(it) => ImportOrDef::ExternCrate(it),
-        }
-    }
-}
-
-impl From<ImportOrGlob> for ImportOrDef {
-    fn from(value: ImportOrGlob) -> Self {
-        match value {
-            ImportOrGlob::Import(it) => ImportOrDef::Import(it),
-            ImportOrGlob::Glob(it) => ImportOrDef::Glob(it),
-        }
-    }
-}
+impl_from!(ImportOrExternCrate { Import, Glob, ExternCrate } for ImportOrDef);
+impl_from!(ImportOrGlob { Import, Glob } for ImportOrDef);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ImportId {
@@ -483,8 +460,11 @@ impl ItemScope {
     }
 
     pub(crate) fn remove_from_value_ns(&mut self, name: &Name, def: ModuleDefId) {
-        let entry = self.values.shift_remove(name);
-        assert!(entry.is_some_and(|entry| entry.def == def))
+        // predicate needed since a different item with the same name may be registered instead,
+        // leading to `shift_remove` removing the wrong item.
+        if self.values.get(name).is_some_and(|entry| entry.def == def) {
+            let _ = self.values.shift_remove(name);
+        }
     }
 
     pub(crate) fn get_legacy_macro(&self, name: &Name) -> Option<&[MacroId]> {

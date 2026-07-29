@@ -1,11 +1,11 @@
-//! This modules implements a function to resolve a path `foo::bar::baz` to a
-//! def, which is used within the name resolution.
+//! This module implements a function to resolve a path `foo::bar::baz` to a
+//! def, which is used within name resolution.
 //!
 //! When name resolution is finished, the result of resolving a path is either
-//! `Some(def)` or `None`. However, when we are in process of resolving imports
+//! `Some(def)` or `None`. However, when we are in the process of resolving imports
 //! or macros, there's a third possibility:
 //!
-//!   I can't resolve this path right now, but I might be resolve this path
+//!   I can't resolve this path right now, but I might be able to resolve this path
 //!   later, when more macros are expanded.
 //!
 //! `ReachedFixedPoint` signals about this.
@@ -504,12 +504,10 @@ impl DefMap {
                         );
                     }
 
-                    let def_map;
                     let module_data = if module.block(db) == self.block_id() {
                         &self[module]
                     } else {
-                        def_map = module.def_map(db);
-                        &def_map[module]
+                        &module.def_map(db)[module]
                     };
 
                     // Since it is a qualified path here, it should not contains legacy macros
@@ -753,14 +751,7 @@ impl DefMap {
 
     fn resolve_in_prelude(&self, db: &dyn SourceDatabase, name: &Name) -> PerNs {
         if let Some((prelude, _use)) = self.prelude {
-            let keep;
-            let def_map = if prelude.krate(db) == self.krate {
-                self
-            } else {
-                // Extend lifetime
-                keep = prelude.def_map(db);
-                keep
-            };
+            let def_map = if prelude.krate(db) == self.krate { self } else { prelude.def_map(db) };
             def_map[prelude].scope.get(name)
         } else {
             PerNs::none()

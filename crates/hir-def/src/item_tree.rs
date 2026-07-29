@@ -63,7 +63,7 @@ use syntax::{SourceFile, SyntaxKind, ast, match_ast};
 use thin_vec::ThinVec;
 use tt::TextRange;
 
-use crate::{BlockId, Lookup, attrs::parse_extra_crate_attrs};
+use crate::{BlockId, attrs::parse_extra_crate_attrs};
 
 pub(crate) use crate::item_tree::{
     attrs::*,
@@ -138,7 +138,7 @@ pub fn file_item_tree(db: &dyn SourceDatabase, file_id: HirFileId, krate: Crate)
     }
 }
 
-#[salsa_macros::tracked(returns(ref))]
+#[salsa::tracked(returns(ref))]
 fn file_item_tree_query(
     db: &dyn SourceDatabase,
     file_id: HirFileId,
@@ -197,17 +197,17 @@ fn file_item_tree_query(
     }
 }
 
-#[salsa_macros::tracked(returns(ref))]
+#[salsa::tracked(returns(ref))]
 pub(crate) fn block_item_tree_query(
     db: &dyn SourceDatabase,
     block: BlockId,
     krate: Crate,
 ) -> ItemTree {
     let _p = tracing::info_span!("block_item_tree_query", ?block).entered();
-    let loc = block.lookup(db);
-    let block = loc.ast_id.to_node(db);
+    let ast_id = block.ast_id(db);
+    let block = ast_id.to_node(db);
 
-    let ctx = lower::Ctx::new(db, loc.ast_id.file_id, krate);
+    let ctx = lower::Ctx::new(db, ast_id.file_id, krate);
     let mut item_tree = ctx.lower_block(&block);
     item_tree.shrink_to_fit();
     item_tree

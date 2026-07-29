@@ -15,7 +15,7 @@ use crate::{
 
 use super::{MirEvalError, interpret_mir};
 
-fn eval_main(db: &TestDB, file_id: EditionedFileId) -> Result<(String, String), MirEvalError> {
+fn eval_main(db: &TestDB, file_id: EditionedFileId) -> Result<(String, String), MirEvalError<'_>> {
     crate::attach_db(db, || {
         let interner = DbInterner::new_no_crate(db);
         let module_id = db.module_for_file(file_id.file_id(db));
@@ -123,7 +123,7 @@ fn check_panic(#[rust_analyzer::rust_fixture] ra_fixture: &str, expected_panic: 
 
 fn check_error_with(
     #[rust_analyzer::rust_fixture] ra_fixture: &str,
-    expect_err: impl FnOnce(MirEvalError) -> bool,
+    expect_err: impl FnOnce(MirEvalError<'_>) -> bool,
 ) {
     let (db, file_ids) = TestDB::with_many_files(ra_fixture);
     crate::attach_db(&db, || {
@@ -1080,6 +1080,75 @@ fn main() {
     let x1 = format_args!("");
     let x2 = format_args!("{}", x1);
     let x3 = format_args!("{} {}", x1, x2);
+}
+"#,
+    );
+}
+
+#[test]
+fn fabs_intrinsic() {
+    check_pass(
+        r#"
+//- minicore: copy, panic
+pub unsafe trait FloatPrimitive: Sized + Copy {}
+unsafe impl FloatPrimitive for f32 {}
+unsafe impl FloatPrimitive for f64 {}
+
+#[rustc_intrinsic]
+fn fabs<T: FloatPrimitive>(x: T) -> T;
+
+fn should_not_reach() { panic!() }
+
+fn main() {
+    if fabs(-3.5f32) != 3.5f32 {
+        should_not_reach();
+    }
+    if fabs(3.5f32) != 3.5f32 {
+        should_not_reach();
+    }
+    if fabs(-3.5f64) != 3.5f64 {
+        should_not_reach();
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn unreachable_intrinsic() {
+    check_error_with(
+        r#"
+#[rustc_intrinsic]
+fn unreachable() -> !;
+
+fn main() {
+    unreachable();
+}
+"#,
+        |e| {
+            let mut err = &e;
+            while let MirEvalError::InFunction(inner, _) = err {
+                err = inner;
+            }
+            matches!(err, MirEvalError::UndefinedBehavior(_))
+        },
+    );
+}
+
+#[test]
+fn caller_location_intrinsic() {
+    check_pass(
+        r#"
+//- minicore: panic_location
+fn should_not_reach() {
+    panic!()
+}
+
+fn main() {
+    let loc = core::panic::Location::caller();
+    if loc.line() != 1 || loc.column() != 1 {
+        should_not_reach();
+    }
 }
 "#,
     );

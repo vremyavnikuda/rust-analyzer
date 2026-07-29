@@ -52,7 +52,7 @@ pub use self::docs::{Docs, IsInnerDoc};
 #[inline]
 fn attrs_from_ast_id_loc<N: AstNode + Into<ast::AnyHasAttrs>>(
     db: &dyn SourceDatabase,
-    lookup: impl Lookup<Database = dyn SourceDatabase, Data = impl AstIdLoc<Ast = N> + HasModule>,
+    lookup: impl Lookup<Data = impl AstIdLoc<Ast = N> + HasModule>,
 ) -> (InFile<ast::AnyHasAttrs>, Crate) {
     let loc = lookup.lookup(db);
     let source = loc.source(db);
@@ -378,6 +378,29 @@ pub fn parse_extra_crate_attrs(db: &dyn SourceDatabase, krate: Crate) -> Option<
     }
 
     Some(p.tree())
+}
+
+/// Whether the crate root declares `#![no_std]`, looking through `cfg_attr` gating.
+#[salsa::tracked(returns(copy))]
+pub(crate) fn crate_supports_no_std(db: &dyn SourceDatabase, krate: Crate) -> bool {
+    fn contains_no_std(meta: ast::Meta) -> bool {
+        match meta {
+            ast::Meta::PathMeta(meta) => meta.path().is1("no_std"),
+            ast::Meta::CfgAttrMeta(meta) => meta.metas().any(contains_no_std),
+            ast::Meta::UnsafeMeta(meta) => meta.meta().is_some_and(contains_no_std),
+            ast::Meta::CfgMeta(_) | ast::Meta::KeyValueMeta(_) | ast::Meta::TokenTreeMeta(_) => {
+                false
+            }
+        }
+    }
+
+    let root_file = krate.root_file_id(db).parse(db).tree();
+    parse_extra_crate_attrs(db, krate)
+        .into_iter()
+        .flat_map(|extra| extra.attrs())
+        .chain(root_file.attrs())
+        .filter_map(|attr| attr.meta())
+        .any(contains_no_std)
 }
 
 fn attrs_source(

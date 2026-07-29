@@ -7,6 +7,16 @@ use crate::tests::check;
 use super::{check_infer, check_no_mismatches, check_types};
 
 #[test]
+fn closure_in_enum_discriminant_does_not_panic() {
+    check(
+        r#"
+        enum Enum { X = || {} }
+                     // ^^^^^ expected isize, got impl Fn()
+        "#,
+    );
+}
+
+#[test]
 fn bug_484() {
     check_infer(
         r#"
@@ -2945,5 +2955,76 @@ fn caller() {
     let _: &[u8] = &(|| encode_fn())();
 }
 "#,
+    );
+}
+
+#[test]
+fn regression_22772() {
+    check_no_mismatches(
+        r#"
+trait Resolve {
+    type Prev;
+}
+
+fn migrations_preserve_index() {
+    pub struct RefExpr1<'x> {
+        pub foo: &'x schema::v0::_Ref0,
+    }
+
+    pub fn new_column<'x, C>() -> &'x C {
+        loop {}
+    }
+
+    RefExpr1 { foo: new_column::<schema::Foo>() };
+
+    mod schema {
+        pub struct Foo {}
+        pub struct FooNew {}
+
+        impl crate::Resolve for FooNew {
+            type Prev = Foo;
+        }
+
+        pub mod v0 {
+            pub type _Ref0 = <super::FooNew as crate::Resolve>::Prev;
+        }
+    }
+}
+    "#,
+    );
+}
+
+#[test]
+fn array_repeat_closure() {
+    check(
+        r#"
+fn f() {[_; || ()]}
+     // ^^^^^^^^^^ expected (), got [{unknown}; _]
+    "#,
+    );
+}
+
+#[test]
+fn regression_22795() {
+    check_no_mismatches(
+        r#"
+trait T { fn m(&self); }
+impl T for Self::Self {}
+struct S;
+impl T for S { fn m(&self) {} }
+fn f(s: S) { s.m(); }
+    "#,
+    );
+}
+
+#[test]
+fn regression_22799() {
+    check_no_mismatches(
+        r#"
+struct S;
+fn f() {
+    <S as S>::S;
+}
+    "#,
     );
 }
