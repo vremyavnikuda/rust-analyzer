@@ -81,7 +81,7 @@ use rustc_type_ir::{
     BoundVarIndexKind, TypeSuperVisitable, TypeVisitableExt,
     inherent::{IntoKind, Ty as _},
 };
-use salsa::Update;
+use salsa::SalsaValue;
 use stdx::impl_from;
 use syntax::ast::{ConstArg, make};
 use traits::FnTrait;
@@ -111,9 +111,9 @@ pub use infer::{
     infer_query_with_inspect,
 };
 pub use lower::{
-    FieldType, GenericDefaults, GenericDefaultsRef, GenericPredicates, ImplTraits,
-    LifetimeElisionKind, LifetimeLoweringMode, LoweringMode, TyDefId, TyLoweringContext,
-    TyLoweringInferVarsCtx, TyLoweringResult, ValueTyDefId, diagnostics::*,
+    FieldType, GenericDefaults, GenericDefaultsRef, GenericPredicates, LifetimeElisionKind,
+    LifetimeLoweringMode, LoweringMode, TyDefId, TyLoweringContext, TyLoweringInferVarsCtx,
+    TyLoweringResult, ValueTyDefId, diagnostics::*,
 };
 pub use next_solver::interner::{attach_db, attach_db_allow_change, with_attached_db};
 pub use target_feature::TargetFeatures;
@@ -554,7 +554,9 @@ impl Span {
 }
 
 /// A [`DefWithBodyId`], or an anon const.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Supertype, Update)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Supertype, SalsaValue,
+)]
 pub enum InferBodyId<'db> {
     DefWithBodyId(DefWithBodyId),
     AnonConstId(AnonConstId<'db>),
