@@ -5086,6 +5086,33 @@ fn foo$0() {}
 }
 
 #[test]
+fn hover_doc_block_style_leading_asterisks() {
+    check(
+        r#"
+/**
+ * Some docs, *not a bullet*.
+ */
+fn foo$0() {}
+"#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn foo()
+            ```
+
+            ---
+
+            Some docs, *not a bullet*.
+        "#]],
+    );
+}
+
+#[test]
 fn hover_comments_dont_highlight_parent() {
     cov_mark::check!(no_highlight_on_comment_hover);
     check_hover_no_result(
@@ -11947,4 +11974,26 @@ fn main() {}
             Comment A
         "#]],
     );
+}
+
+#[test]
+fn resolve_array_type_with_anon_const_panic() {
+    use syntax::AstNode;
+    let (analysis, position) = crate::fixture::position(
+        r#"
+fn main() {
+    let x: [u8; 2 + 2$0] = [0; 4];
+}
+"#,
+    );
+    let db = &analysis.db;
+    hir::attach_db(db, || {
+        let sema = hir::Semantics::new(db);
+        let file = sema.parse_guess_edition(position.file_id);
+        let token = file.syntax().token_at_offset(position.offset).right_biased().unwrap();
+        let type_node = token.parent_ancestors().find_map(syntax::ast::Type::cast).unwrap();
+
+        let resolved = sema.resolve_type(&type_node).unwrap();
+        let _ = resolved.as_array(db);
+    });
 }
