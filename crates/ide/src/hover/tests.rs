@@ -7978,6 +7978,7 @@ impl T for () {
             ```
 
             ```rust
+            impl T for ()
             fn func()
             ```
 
@@ -8192,6 +8193,7 @@ fn f() {
             ```
 
             ```rust
+            impl core::ops::Deref for Struct
             fn deref(&self) -> &Self::Target
             ```
         "#]],
@@ -8741,6 +8743,158 @@ foo!(r"{$0aaaaa}");
             ```rust
             let aaaaa: &str
             ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_cfg_predicate() {
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0true)]
+fn test() {}
+"#,
+        expect![[r#"
+            *true*
+            cfg predicate evaluated: `true` (`true`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg(any($0true, false))]
+fn test() {}
+"#,
+        expect![[r#"
+            *true*
+            cfg predicate evaluated: `true` (`true`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg(any(true, $0false))]
+fn test() {}
+"#,
+        expect![[r#"
+            *false*
+            cfg predicate evaluated: `false` (`false`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0any(true, false))]
+fn test() {}
+"#,
+        expect![[r#"
+            *any*
+            cfg predicate evaluated: `true` (`any(true, false)`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0all(true, false))]
+fn test() {}
+"#,
+        expect![[r#"
+            *all*
+            cfg predicate evaluated: `false` (`all(true, false)`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0test)]
+fn test() {}
+"#,
+        expect![[r#"
+            *test*
+            cfg predicate evaluated: `true` (`test`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0opt_level = "2")]
+fn test() {}
+"#,
+        expect![[r#"
+            *opt_level*
+            cfg predicate evaluated: `true` (`opt_level = "2"`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+#[cfg($0opt_level = "3")]
+fn test() {}
+"#,
+        expect![[r#"
+            *opt_level*
+            cfg predicate evaluated: `false` (`opt_level = "3"`)
+        "#]],
+    );
+    check(
+        r#"
+//- /main.rs cfg:test,dbg=false,opt_level=2
+macro_rules! identity { ($($t:tt)*) => { $($t)* }; }
+identity! {
+    #[cfg($0test)]
+    fn test() {}
+}
+"#,
+        expect![[r#"
+            *test*
+            cfg predicate evaluated: `true` (`test`)
+        "#]],
+    );
+    check(
+        r#"
+//- /lib1.rs crate:dep cfg:opt_level=3
+#[macro_export]
+macro_rules! expand_cfg { ($val:tt) => { #[cfg(opt_level = $val)] fn f(){} }; }
+//- /main.rs crate:bin deps:dep cfg:test,dbg=false,opt_level=2
+dep::expand_cfg!("$02");
+"#,
+        expect![[r#"
+            *"2"*
+            cfg predicate evaluated: `true` (`opt_level="2"`)
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn test() { cfg!($0opt_level = "2") }
+"#,
+        expect![[r#"
+            *opt_level*
+            cfg predicate evaluated: `true` (`opt_level="2"`)
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn test() { cfg!($0opt_level = "3") }
+"#,
+        expect![[r#"
+            *opt_level*
+            cfg predicate evaluated: `false` (`opt_level="3"`)
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn test() { cfg!(and(false, $0opt_level = "2")) }
+"#,
+        expect![[r#"
+            *opt_level*
+            cfg predicate evaluated: `true` (`opt_level="2"`)
         "#]],
     );
 }
@@ -11362,6 +11516,56 @@ fn bar(v: &Foo<i32>) {
 }
 
 #[test]
+fn show_impl_container_without_type_params() {
+    check(
+        r#"
+trait Trait { fn method(); }
+impl Trait for Foo { fn method() {} }
+struct Foo;
+
+fn main() {
+    Foo::$0method()
+}
+    "#,
+        expect![[r#"
+            *method*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            impl Trait for Foo
+            fn method()
+            ```
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: clone, derive
+#[derive(Clone)]
+struct Foo;
+
+fn main() {
+    Foo::$0clone()
+}
+    "#,
+        expect![[r#"
+            *clone*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            impl Clone for Foo
+            pub fn clone(&self) -> Self
+            ```
+        "#]],
+    );
+}
+
+#[test]
 fn extra_lifetime_param_on_trait_method_subst() {
     check(
         r#"
@@ -11387,6 +11591,7 @@ fn main() {
             ```
 
             ```rust
+            impl ValueEnum for AudioFormat
             fn to_possible_value<'a>(&'a self)
             ```
         "#]],

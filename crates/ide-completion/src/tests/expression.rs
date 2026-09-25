@@ -3289,7 +3289,7 @@ fn bar() {
             tt FromIterator
             tt IntoIterator
             tt Iterator
-            ta Result (use core::fmt::Result)
+            ta Result (use core::fmt::Result)     Result<(), Error>
             ev Err(…)                                        Err(E)
             ev None                                            None
             ev Ok(…)                                          Ok(T)
@@ -4206,6 +4206,88 @@ fn foo(t: T) {
                 sn unsafe    unsafe {}
                 sn while while expr {}
             "#]],
+    );
+}
+
+#[test]
+fn complete_cfg_macro() {
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn main() {
+    if cfg!(a$0)
+}
+        "#,
+        expect![[r#"
+            ba all
+            ba any
+            ba dbg
+            ba false
+            ba not
+            ba opt_level
+            ba test
+            ba true
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn main() {
+    if cfg!($0)
+}
+        "#,
+        expect![[r#"
+            ba all
+            ba any
+            ba dbg
+            ba false
+            ba not
+            ba opt_level
+            ba test
+            ba true
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn main() {
+    if cfg!(all($0))
+}
+        "#,
+        expect![[r#"
+            ba all
+            ba any
+            ba dbg
+            ba false
+            ba not
+            ba opt_level
+            ba test
+            ba true
+        "#]],
+    );
+    check(
+        r#"
+//- minicore: cfg
+//- /main.rs cfg:test,dbg=false,opt_level=2
+fn main() {
+    match true {
+        cfg!(all($0)) => (),
+    }
+}
+        "#,
+        expect![[r#"
+            ba all
+            ba any
+            ba dbg
+            ba false
+            ba not
+            ba opt_level
+            ba test
+            ba true
+        "#]],
     );
 }
 
