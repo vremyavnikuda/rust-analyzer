@@ -495,7 +495,7 @@ fn analyze<'db>(
 
     let Some(name_like) = find_node_at_offset(&speculative_file, speculative_offset) else {
         let analysis = if let Some(original) = ast::String::cast(original_token.clone())
-            && original_token.parent().is_none_or(|it| !ast::CfgAtom::can_cast(it.kind()))
+            && self_token.parent().is_none_or(|it| !ast::CfgAtom::can_cast(it.kind()))
         {
             CompletionAnalysis::String { original, expanded: ast::String::cast(self_token.clone()) }
         } else {
@@ -883,7 +883,7 @@ fn expected_type_and_name<'db>(
     let expected_func = original_ty.flatten().and_then(|ty| {
         let is_direct_arg = token
             .parent()
-            .filter(|it| ast::NameLike::can_cast(it.kind()))
+            .filter(|it| ast::NameLike::can_cast(it.kind()) || token.kind() == T![::])
             .into_iter()
             .flat_map(|it| it.ancestors().skip(1))
             .find(|it| {
@@ -1743,12 +1743,14 @@ fn classify_name_ref<'db>(
                 qualifier_ctx.abi_node = error_node.children().find_map(ast::Abi::cast);
             }
 
+            let allowed_prev_kinds =
+                [T![;], T!['}'], T!['{'], T![']'], SyntaxKind::INNER_DOC_COMMENT];
             if let PathKind::Item { .. } = path_ctx.kind
                 && qualifier_ctx.none()
                 && let Some(t) = top.first_token()
                 && let Some(prev) =
                     t.prev_token().and_then(|t| syntax::algo::skip_trivia_token(t, Direction::Prev))
-                && ![T![;], T!['}'], T!['{'], T![']']].contains(&prev.kind())
+                && !allowed_prev_kinds.contains(&prev.kind())
             {
                 // This was inferred to be an item position path, but it seems
                 // to be part of some other broken node which leaked into an item
